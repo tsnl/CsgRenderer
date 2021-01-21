@@ -16,9 +16,12 @@ set(GLFW_BUILD_STATIC ON)
 
 add_library(
     wololo STATIC
-    src/wololo/glfw.h
+    
     src/wololo/wololo.c
     src/wololo/wololo.h
+    src/wololo/app.h
+    src/wololo/app.c
+    src/wololo/platform.h
 )
 
 add_executable(

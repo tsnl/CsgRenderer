@@ -1,39 +1,47 @@
-#include <wololo/glfw.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
 
-int example_1(void) {
-    GLFWwindow* window;
+#include <wololo/wololo.h>
 
-    // Initialize the library
-    if (!glfwInit())
-        return -1;
+bool test1_init_cb(
+    Wo_App* app, 
+    uint32_t window_width, uint32_t window_height, 
+    char const* window_name, 
+    double target_frame_time_sec
+);
+void test1_update_cb(Wo_App* app, double elapsed_time_in_sec);
+void test1_quit_cb(Wo_App* app);
 
-    // Create a windowed mode window and its OpenGL context
-    window = glfwCreateWindow(640, 480, "Hello World", NULL, NULL);
-    if (!window)
-    {
-        glfwTerminate();
+int main_test1() {
+    Wo_App* app_ref = wo_app_new(
+        60.0,
+        600, 450, "Test 1",
+        test1_init_cb, test1_update_cb, test1_quit_cb
+    );
+    bool ok = wo_app_run(app_ref);
+    if (ok) {
+        return 0;
+    } else {
         return -1;
     }
-
-    // Make the window's context current
-    glfwMakeContextCurrent(window);
-
-    /* Loop until the user closes the window */
-    while (!glfwWindowShouldClose(window))
-    {
-        // Render here.
-        
-        // Swap front and back buffers
-        glfwSwapBuffers(window);
-
-        // Poll for and process events
-        glfwPollEvents();
-    }
-
-    glfwTerminate();
-    return 0;
+}
+bool test1_init_cb(
+    Wo_App* app, 
+    uint32_t window_width, uint32_t window_height, 
+    char const* window_name, 
+    double target_frame_time_sec
+) {
+    printf("Initializing '%s' {w=%u, h=%u} @ %lf ups\n", window_name, window_width, window_height, target_frame_time_sec);
+    return true;
+}
+void test1_update_cb(Wo_App* app, double elapsed_time_in_sec) {
+    // printf("Hello!\n");
+}
+void test1_quit_cb(Wo_App* app) {
+    printf("Quitting...");
 }
 
 int main() {
-    return example_1();
+    return main_test1();
 }
