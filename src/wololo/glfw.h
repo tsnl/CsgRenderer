@@ -1,0 +1,7 @@
+#ifndef INCLUDED_WOLOLO_GLFW_H
+#define INCLUDED_WOLOLO_GLFW_H
+
+#define GLFW_INCLUDE_VULKAN
+#include <GLFW/glfw3.h>
+
+#endif  // INCLUDED_WOLOLO_GLFW_H
