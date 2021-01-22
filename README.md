@@ -1,6 +1,6 @@
 # Wololo Renderer
 
-A ray-tracing renderer using Computational Solid Geometry (CSG) to represent scenes and 
+A ray-tracing renderer using Constructive Solid Geometry (CSG) to represent scenes and 
 Spatiotemporal Variance-Guided Filtering (SVGF) for single sample-per-pixel ray-tracing.
 
 Despite the complicated names, should make creating procedural assets easier, produce 
