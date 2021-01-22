@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+
 #include "wololo/wmath.h"
+#include "wololo/app.h"
 
 //
 // A Renderer produces an image from a system of images.
@@ -13,7 +15,7 @@ typedef struct Wo_Renderer Wo_Renderer;
 typedef uint32_t Wo_Node;
 typedef uint32_t Wo_Material;
 
-Wo_Renderer* wo_renderer_new(char const* name, size_t max_node_count);
+Wo_Renderer* wo_renderer_new(Wo_App* app, char const* name, size_t max_node_count);
 void wo_renderer_del(Wo_Renderer* renderer);
 
 typedef struct Wo_Node_Argument Wo_Node_Argument;

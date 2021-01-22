@@ -9,8 +9,9 @@
 #include <assert.h>
 
 #include "wololo/wmath.h"
-
 #include "wololo/platform.h"
+#include "wololo/app.h"
+
 #include <vulkan/vulkan.h>
 
 //
@@ -27,8 +28,7 @@ static char const* default_vk_validation_layer_names[DEFAULT_VK_VALIDATION_LAYER
 // minimum extensions are required for the app to run at all.
 static uint32_t const MINIMUM_VK_DEVICE_EXTENSION_COUNT = 1;
 static char const* minimum_vk_device_extension_names[MINIMUM_VK_DEVICE_EXTENSION_COUNT] = {
-    "VK_KHR_swapchain",
-    // required to draw to a window.
+    "VK_KHR_swapchain"
 };
 
 // optional extensions are loaded if supported.
@@ -80,6 +80,7 @@ typedef enum RequiredVkQueueFamily RequiredVkQueueFamily;
 
 typedef struct Wo_Renderer Wo_Renderer;
 struct Wo_Renderer {
+    // Own properties:
     size_t max_node_count;
     size_t current_node_count;
     NodeType* node_type_table;
@@ -87,33 +88,46 @@ struct Wo_Renderer {
     uint64_t* node_is_nonroot_bitset;
     char* name;
 
+    // App reference:
+    Wo_App* app;
+
+    // Vulkan instances & devices:
     VkInstance vk_instance;
     VkPhysicalDevice vk_physical_device;
     uint32_t vk_physical_device_count;
     VkPhysicalDevice* vk_physical_devices;
     
-    bool vk_validation_layers_enabled;
+    // Vulkan validation layers:
+    bool are_vk_validation_layers_enabled;
     VkLayerProperties* vk_available_validation_layers;
     uint32_t vk_enabled_validation_layer_count;
     char const** vk_enabled_validation_layer_names;
     
+    // Vulkan queue families:
     uint32_t vk_queue_family_count;
     VkQueueFamilyProperties* vk_queue_family_properties;
     
+    // Vulkan queues:
     uint32_t vk_graphics_queue_family_index;
+    uint32_t vk_present_queue_family_index;
     VkQueue vk_graphics_queue;
+    VkQueue vk_present_queue;
 
+    // Vulkan devices and extensions:
     VkDevice vk_device;
     uint32_t vk_available_device_extension_count;
     VkExtensionProperties* vk_available_device_extensions;
     uint32_t vk_enabled_device_extension_count;
     char const** vk_enabled_device_extension_names;
+
+    // surface to present to:
+    VkSurfaceKHR vk_present_surface;
 };
 
 
-Wo_Renderer* new_renderer(char const* name, size_t max_node_count);
+Wo_Renderer* new_renderer(Wo_App* app, char const* name, size_t max_node_count);
 Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count);
-Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer);
+Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer);
 void del_renderer(Wo_Renderer* renderer);
 bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node);
 void set_nonroot_node(Wo_Renderer* renderer, Wo_Node node);
@@ -122,10 +136,10 @@ void set_nonroot_node(Wo_Renderer* renderer, Wo_Node node);
 // Implementation:
 //
 
-Wo_Renderer* new_renderer(char const* name, size_t max_node_count) {
+Wo_Renderer* new_renderer(Wo_App* app, char const* name, size_t max_node_count) {
     // allocating all the memory we need:
     Wo_Renderer* renderer = allocate_renderer(name, max_node_count);
-    renderer = vk_init_renderer(renderer);
+    renderer = vk_init_renderer(app, renderer);
     return renderer;
 }
 Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count) {
@@ -184,14 +198,17 @@ Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count) {
     }
     return renderer;
 }
-Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
-
+Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     // setting ambient state variables:
-    renderer->vk_validation_layers_enabled = true;
+    renderer->app = app;
+    renderer->are_vk_validation_layers_enabled = true;
 
     // we know all pointers are NULL-initialized, so if non-NULL, we know there's an error.
 
-    // creating a Vulkan instance:
+    // checking that GLFW supports Vulkan:
+    assert(glfwVulkanSupported() == GLFW_TRUE && "GLFW should support Vulkan.");
+
+    // creating a Vulkan instance, applying validation layers:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Instance
     {
         VkApplicationInfo app_info = {}; {
@@ -217,7 +234,7 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
             
             // setting up validation layers:
             // https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Validation_layers
-            if (renderer->vk_validation_layers_enabled) {
+            if (renderer->are_vk_validation_layers_enabled) {
                 // querying available:
                 uint32_t available_validation_layer_count = 0;
                 vkEnumerateInstanceLayerProperties(
@@ -319,6 +336,23 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
         }
     }
     
+    // Creating a software surface for the window:
+    // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface#page_Querying-for-presentation-support
+    {
+        // renderer->vk_present_surface:
+        GLFWwindow* glfw_window = wo_app_glfw_window(renderer->app);
+        VkResult result = glfwCreateWindowSurface(
+            renderer->vk_instance,
+            glfw_window,
+            NULL,
+            &renderer->vk_present_surface
+        );
+        if (result != VK_SUCCESS) {
+            printf("[Wololo] Failed to create Vulkan surface using GLFW.\n");
+            goto fatal_error;
+        }
+    }
+
     // checking the device's queue properties:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
     {   
@@ -326,6 +360,7 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
         vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, NULL);
         renderer->vk_queue_family_count = queue_family_count;
         renderer->vk_graphics_queue_family_index = renderer->vk_queue_family_count;
+        renderer->vk_present_queue_family_index = renderer->vk_queue_family_count;
         
         renderer->vk_queue_family_properties = malloc(queue_family_count * sizeof(VkQueueFamilyProperties));
         vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, renderer->vk_queue_family_properties);
@@ -335,9 +370,21 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
             if (family_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
                 renderer->vk_graphics_queue_family_index = index;
             }
-            
+
+            VkBool32 present_supported = false;
+            vkGetPhysicalDeviceSurfaceSupportKHR(
+                renderer->vk_physical_device,
+                index,
+                renderer->vk_present_surface,
+                &present_supported
+            );
+            if (present_supported) {
+                renderer->vk_present_queue_family_index = index;
+            }
+
             bool indices_are_complete = (
                 (renderer->vk_graphics_queue_family_index != renderer->vk_queue_family_count) &&
+                (renderer->vk_present_queue_family_index != renderer->vk_queue_family_count) &&
                 (true)
             );
             if (indices_are_complete) {
@@ -347,6 +394,14 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
         if (renderer->vk_graphics_queue_family_index == renderer->vk_queue_family_count) {
             printf("[Wololo] No queue family with VK_QUEUE_GRAPHICS_BIT was found.\n");
             goto fatal_error;
+        } else {
+            printf("[Wololo] Vulkan graphics queue loaded.\n");
+        }
+        if (renderer->vk_present_queue_family_index == renderer->vk_queue_family_count) {
+            printf("[Wololo] No queue family with VK_QUEUE_PRESENT_BIT was found.\n");
+            goto fatal_error;
+        } else {
+            printf("[Wololo] Vulkan present queue loaded.\n");
         }
     }
 
@@ -372,109 +427,109 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
         create_info.pQueueCreateInfos = &queue_create_info;
         create_info.queueCreateInfoCount = 1;
         create_info.pEnabledFeatures = &device_features;
-
-        // loading extensions (like the Swap-chain extension):
+    
+        // loading extensions (like the Swap-chain extension) into create_info:
         // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
-        {
-            // setting 'renderer->vk_available_device_extension_count'
-            vkEnumerateDeviceExtensionProperties(
-                renderer->vk_physical_device, NULL,
-                &renderer->vk_available_device_extension_count,
-                NULL
-            );
-            
-            // allocating + filling 'renderer->vk_available_device_extensions':
-            renderer->vk_available_device_extensions = malloc(
-                sizeof(VkExtensionProperties) *
-                renderer->vk_available_device_extension_count
-            );
-            vkEnumerateDeviceExtensionProperties(
-                renderer->vk_physical_device, NULL,
-                &renderer->vk_available_device_extension_count,
-                renderer->vk_available_device_extensions
-            );
+        
+        // setting 'renderer->vk_available_device_extension_count'
+        vkEnumerateDeviceExtensionProperties(
+            renderer->vk_physical_device, NULL,
+            &renderer->vk_available_device_extension_count,
+            NULL
+        );
+        
+        // allocating + filling 'renderer->vk_available_device_extensions':
+        renderer->vk_available_device_extensions = malloc(
+            sizeof(VkExtensionProperties) *
+            renderer->vk_available_device_extension_count
+        );
+        vkEnumerateDeviceExtensionProperties(
+            renderer->vk_physical_device, NULL,
+            &renderer->vk_available_device_extension_count,
+            renderer->vk_available_device_extensions
+        );
 
-            bool const debug_print_all_available_exts = false;
-            if (debug_print_all_available_exts) {
-                uint32_t ext_count = renderer->vk_available_device_extension_count;
-                for (uint32_t i = 0; i < ext_count; i++) {
-                    printf("\t[Vulkan] Extension supported: \"%s\" [%d/%d]\n", 
-                        renderer->vk_available_device_extensions[i].extensionName,
-                        i+1, ext_count
-                    );
-                }
+        bool const debug_print_all_available_exts = true;
+        if (debug_print_all_available_exts) {
+            uint32_t ext_count = renderer->vk_available_device_extension_count;
+            printf("[Vulkan] %d extensions found:\n", ext_count);
+            for (uint32_t i = 0; i < ext_count; i++) {
+                printf("\t[%d/%d] %s\n", 
+                    i+1, ext_count,
+                    renderer->vk_available_device_extensions[i].extensionName
+                );
             }
-
-            // storing all enabled extensions' names:
-            uint32_t max_extension_count = (
-                MINIMUM_VK_DEVICE_EXTENSION_COUNT + 
-                OPTIONAL_VK_DEVICE_EXTENSION_COUNT
-            );
-            renderer->vk_enabled_device_extension_count = 0;
-            renderer->vk_enabled_device_extension_names = malloc(max_extension_count * sizeof(char const*));
-            for (uint32_t min_ext_index = 0; min_ext_index < MINIMUM_VK_DEVICE_EXTENSION_COUNT; min_ext_index++) {
-                char const* ext_name = minimum_vk_device_extension_names[min_ext_index];
-                
-                // searching for this extension:
-                bool ext_found = false;
-                uint32_t const available_count = renderer->vk_available_device_extension_count;
-                for (uint32_t available_ext_index = 0; available_ext_index < available_count; available_ext_index++) {
-                    VkExtensionProperties available_ext_props = renderer->vk_available_device_extensions[available_ext_index];
-                    char const* available_ext_name = available_ext_props.extensionName;
-
-                    if (0 == strcmp(available_ext_name, ext_name)) {
-                        ext_found = true;
-                        break;
-                    }
-                }
-
-                if (ext_found) {
-                    printf("[Wololo] Found Vulkan device extension \"%s\"\n", ext_name);
-                    uint32_t index = renderer->vk_enabled_device_extension_count++;
-                    renderer->vk_enabled_device_extension_names[index] = ext_name;
-                } else {
-                    printf("[Wololo] Could not find support for Vulkan device extension \"%s\"\n", ext_name);
-                    goto fatal_error;
-                }
-            }
-            for (uint32_t opt_ext_index = 0; opt_ext_index < OPTIONAL_VK_DEVICE_EXTENSION_COUNT; opt_ext_index++) {
-                char const* ext_name = optional_vk_device_extension_names[opt_ext_index];
-                
-                // searching for this extension:
-                bool ext_found = false;
-                uint32_t const available_count = renderer->vk_available_device_extension_count;
-                for (uint32_t available_ext_index = 0; available_ext_index < available_count; available_ext_index++) {
-                    VkExtensionProperties available_ext_props = renderer->vk_available_device_extensions[available_ext_index];
-                    char const* available_ext_name = available_ext_props.extensionName;
-
-                    if (0 == strcmp(available_ext_name, ext_name)) {
-                        ext_found = true;
-                        break;
-                    }
-                }
-                if (ext_found) {
-                    printf("[Wololo] Found [optional] Vulkan device extension \"%s\"\n", ext_name);
-                    uint32_t index = renderer->vk_enabled_device_extension_count++;
-                    renderer->vk_enabled_device_extension_names[index] = ext_name;
-                } else {
-                    // do nothing; optional extension.
-                }
-            }
-
-            // setting extension request args:
-            create_info.enabledExtensionCount = renderer->vk_enabled_device_extension_count;
-            create_info.ppEnabledExtensionNames = renderer->vk_enabled_device_extension_names;
         }
 
+        // storing all enabled extensions' names:
+        uint32_t max_extension_count = (
+            MINIMUM_VK_DEVICE_EXTENSION_COUNT + 
+            OPTIONAL_VK_DEVICE_EXTENSION_COUNT
+        );
+        renderer->vk_enabled_device_extension_count = 0;
+        renderer->vk_enabled_device_extension_names = malloc(max_extension_count * sizeof(char const*));
+        for (uint32_t min_ext_index = 0; min_ext_index < MINIMUM_VK_DEVICE_EXTENSION_COUNT; min_ext_index++) {
+            char const* ext_name = minimum_vk_device_extension_names[min_ext_index];
+            
+            // searching for this extension:
+            bool ext_found = false;
+            uint32_t const available_count = renderer->vk_available_device_extension_count;
+            for (uint32_t available_ext_index = 0; available_ext_index < available_count; available_ext_index++) {
+                VkExtensionProperties available_ext_props = renderer->vk_available_device_extensions[available_ext_index];
+                char const* available_ext_name = available_ext_props.extensionName;
+
+                if (0 == strcmp(available_ext_name, ext_name)) {
+                    ext_found = true;
+                    break;
+                }
+            }
+
+            if (ext_found) {
+                printf("[Wololo] Initializing Vulkan device extension \"%s\"\n", ext_name);
+                uint32_t index = renderer->vk_enabled_device_extension_count++;
+                renderer->vk_enabled_device_extension_names[index] = ext_name;
+            } else {
+                printf("[Wololo] Could not find support for Vulkan device extension \"%s\"\n", ext_name);
+                goto fatal_error;
+            }
+        }
+        for (uint32_t opt_ext_index = 0; opt_ext_index < OPTIONAL_VK_DEVICE_EXTENSION_COUNT; opt_ext_index++) {
+            char const* ext_name = optional_vk_device_extension_names[opt_ext_index];
+            
+            // searching for this extension:
+            bool ext_found = false;
+            uint32_t const available_count = renderer->vk_available_device_extension_count;
+            for (uint32_t available_ext_index = 0; available_ext_index < available_count; available_ext_index++) {
+                VkExtensionProperties available_ext_props = renderer->vk_available_device_extensions[available_ext_index];
+                char const* available_ext_name = available_ext_props.extensionName;
+
+                if (0 == strcmp(available_ext_name, ext_name)) {
+                    ext_found = true;
+                    break;
+                }
+            }
+            if (ext_found) {
+                printf("[Wololo] Found [optional] Vulkan device extension \"%s\"\n", ext_name);
+                uint32_t index = renderer->vk_enabled_device_extension_count++;
+                renderer->vk_enabled_device_extension_names[index] = ext_name;
+            } else {
+                // do nothing; optional extension.
+            }
+        }
+
+        // setting extension request args:
+        create_info.enabledExtensionCount = renderer->vk_enabled_device_extension_count;
+        create_info.ppEnabledExtensionNames = renderer->vk_enabled_device_extension_names;
+
         // setting up validation layers:
-        if (renderer->vk_validation_layers_enabled) {
+        if (renderer->are_vk_validation_layers_enabled) {
             create_info.enabledLayerCount = DEFAULT_VK_VALIDATION_LAYER_COUNT;
             create_info.ppEnabledLayerNames = default_vk_validation_layer_names;
         } else {
             create_info.enabledLayerCount = 0;
         }
-
-        // at last, creating `renderer->vk_device`:
+    
+        // creating logical `renderer->vk_device` using 'create_info'
         VkResult result = vkCreateDevice(
             renderer->vk_physical_device, 
             &create_info, 
@@ -496,20 +551,49 @@ Wo_Renderer* vk_init_renderer(Wo_Renderer* renderer) {
             0,
             &renderer->vk_graphics_queue
         );
+
+        // renderer->vk_present_queue:
+        vkGetDeviceQueue(
+            renderer->vk_device,
+            renderer->vk_present_queue_family_index,
+            0,
+            &renderer->vk_present_queue
+        );
     }
 
+    //
+    //
+    //
+    // TODO: Continue Vulkan tutorial by validating Swap chain support: check 'swapChainAdequate'
+    // https://vulkan-tutorial.com/en/Drawing_a_triangle/Presentation/Swap_chain#page_Querying-details-of-swap-chain-support
+    // - vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+    // - ...
+    //
+    //
+    //
+
+  success:
+    // reporting success, returning:
+    printf("[Wololo] Successfully initialized Vulkan backend.\n");
     return renderer;
 
   fatal_error:
+    printf("[Wololo] A fatal error occurred while initializing Vulkan.\n");
     del_renderer(renderer);
     return NULL;
 }
 void del_renderer(Wo_Renderer* renderer) {
     if (renderer != NULL) {
         if (renderer->vk_device != VK_NULL_HANDLE) {
+            printf("[Wololo] Destroying Vulkan (logical) device\n");
             vkDestroyDevice(renderer->vk_device, NULL);
         }
+        if (renderer->vk_present_surface != NULL) {
+            printf("[Wololo] Destroying Vulkan window present surface\n");
+            vkDestroySurfaceKHR(renderer->vk_instance, renderer->vk_present_surface, NULL);
+        }
         if (renderer->vk_instance != VK_NULL_HANDLE) {
+            printf("[Wololo] Destroying Vulkan instance\n");
             vkDestroyInstance(renderer->vk_instance, NULL);
         }
         if (renderer->vk_physical_devices != NULL) {
@@ -536,6 +620,7 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_enabled_device_extension_names);
             renderer->vk_enabled_device_extension_names = NULL;
         }
+        printf("[Wololo] Destroying renderer \"%s\"\n", renderer->name);
         free(renderer);
     }
 }
@@ -602,8 +687,8 @@ Wo_Node add_difference_of_node(Wo_Renderer* renderer, Wo_Node_Argument left, Wo_
 //
 //
 
-Wo_Renderer* wo_renderer_new(char const* name, size_t max_renderer_count) {
-    return new_renderer(name, max_renderer_count);
+Wo_Renderer* wo_renderer_new(Wo_App* app, char const* name, size_t max_renderer_count) {
+    return new_renderer(app, name, max_renderer_count);
 }
 void wo_renderer_del(Wo_Renderer* renderer) {
     del_renderer(renderer);

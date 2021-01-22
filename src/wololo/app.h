@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "platform.h"
+
 //
 // forward
 //
@@ -28,5 +30,5 @@ Wo_App* wo_app_new(
     Wo_DeInitCallbackPtr opt_de_init_cb
 );
 bool wo_app_run(Wo_App* app_ref);
-
 void wo_app_swap_scene(Wo_App* app_ref, Wo_Renderer* new_scene_renderer);
+GLFWwindow* wo_app_glfw_window(Wo_App* app);

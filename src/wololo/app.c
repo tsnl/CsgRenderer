@@ -22,6 +22,8 @@ Wo_App* app_new(
 );
 bool app_run(Wo_App* app);
 
+void glfw_error_handler(int code, char const* message);
+
 struct Wo_App {
     Wo_InitCallbackPtr extension_init_cb;
     Wo_UpdateCallbackPtr extension_update_cb;
@@ -77,7 +79,11 @@ bool app_run(Wo_App* app) {
         return false;
     }
 
+    // Setting the error callback:
+    glfwSetErrorCallback(glfw_error_handler);
+
     // Create a windowed mode window and its OpenGL context
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
     glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
     app->glfw_window = glfwCreateWindow(
         app->window_width, app->window_height, 
@@ -89,9 +95,6 @@ bool app_run(Wo_App* app) {
         glfwTerminate();
         return false;
     }
-
-    // Make the window's context current
-    glfwMakeContextCurrent(app->glfw_window);
 
     // Environment set up!
 
@@ -142,7 +145,7 @@ bool app_run(Wo_App* app) {
         // cf https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Base_code
         
         // Swap front and back buffers
-        glfwSwapBuffers(app->glfw_window);
+        // glfwSwapBuffers(app->glfw_window);
 
         // Poll for and process events
         glfwPollEvents();
@@ -159,6 +162,10 @@ bool app_run(Wo_App* app) {
 
 void app_swap_scene(Wo_App* app, Wo_Renderer* renderer) {
     app->renderer = renderer;
+}
+
+void glfw_error_handler(int code, char const* message) {
+    printf("[GLFW] %s (%d)\n", message, code);
 }
 
 //
@@ -186,4 +193,8 @@ bool wo_app_run(Wo_App* app) {
 
 void wo_app_swap_scene(Wo_App* app_ref, Wo_Renderer* new_scene_renderer) {
     return app_swap_scene(app_ref, new_scene_renderer);
+}
+
+GLFWwindow* wo_app_glfw_window(Wo_App* app) {
+    return app->glfw_window;
 }
