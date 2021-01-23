@@ -14,6 +14,9 @@
 
 #include <vulkan/vulkan.h>
 
+#define MIN(A,B) (A < B ? A : B)
+#define MAX(A,B) (A > B ? A : B)
+
 //
 //
 // Local implementation:
@@ -120,8 +123,26 @@ struct Wo_Renderer {
     uint32_t vk_enabled_device_extension_count;
     char const** vk_enabled_device_extension_names;
 
-    // surface to present to:
+    // surface to present to
+    // chosen format + modes from after surface creation:
     VkSurfaceKHR vk_present_surface;
+    VkSurfaceFormatKHR vk_chosen_present_surface_format;
+    VkPresentModeKHR vk_chosen_present_surface_mode;
+
+    // available surface present-mode and format:
+    VkSurfaceCapabilitiesKHR vk_present_surface_capabilities;
+    uint32_t vk_available_format_count;
+    VkSurfaceFormatKHR* vk_available_formats;
+    uint32_t vk_available_present_mode_count;
+    VkPresentModeKHR* vk_available_present_modes;
+    
+    // chosen swap-extent/aka framebuffer size:
+    VkExtent2D vk_frame_extent;
+
+    // the swapchain:
+    VkSwapchainKHR vk_swapchain;
+    uint32_t vk_swapchain_images_count;
+    VkImage* vk_swapchain_images;
 };
 
 
@@ -382,6 +403,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 renderer->vk_present_queue_family_index = index;
             }
 
+            // if all indices have been assigned, we needn't search further:
             bool indices_are_complete = (
                 (renderer->vk_graphics_queue_family_index != renderer->vk_queue_family_count) &&
                 (renderer->vk_present_queue_family_index != renderer->vk_queue_family_count) &&
@@ -561,17 +583,248 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         );
     }
 
-    //
-    //
-    //
-    // TODO: Continue Vulkan tutorial by validating Swap chain support: check 'swapChainAdequate'
-    // https://vulkan-tutorial.com/en/Drawing_a_triangle/Presentation/Swap_chain#page_Querying-details-of-swap-chain-support
-    // - vkGetPhysicalDeviceSurfaceCapabilitiesKHR
-    // - ...
-    //
-    //
-    //
+    // Creating the swapchain:
+    {
+        // Querying GPU swap chain capabilities:
+        bool swap_chain_adequate = false;
+        {
+            // renderer->vk_present_surface_capabilities
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+                renderer->vk_physical_device,
+                renderer->vk_present_surface, 
+                &renderer->vk_present_surface_capabilities
+            );
 
+            // counting, allocating, setting available formats:
+            vkGetPhysicalDeviceSurfaceFormatsKHR(
+                renderer->vk_physical_device,
+                renderer->vk_present_surface,
+                &renderer->vk_available_format_count,
+                NULL
+            );
+            if (renderer->vk_available_format_count > 0) {
+                renderer->vk_available_formats = malloc(
+                    sizeof(VkSurfaceFormatKHR) * 
+                    renderer->vk_available_format_count
+                );
+                assert(renderer->vk_available_formats != NULL && "Out of memory-- malloc failed.");
+            } else {
+                renderer->vk_available_formats = NULL;
+            }
+            vkGetPhysicalDeviceSurfaceFormatsKHR(
+                renderer->vk_physical_device,
+                renderer->vk_present_surface,
+                &renderer->vk_available_format_count,
+                renderer->vk_available_formats
+            );
+
+            // counting, allocating, setting available present modes:
+            vkGetPhysicalDeviceSurfacePresentModesKHR(
+                renderer->vk_physical_device,
+                renderer->vk_present_surface,
+                &renderer->vk_available_present_mode_count,
+                NULL
+            );
+            if (renderer->vk_available_present_mode_count > 0) {
+                renderer->vk_available_present_modes = malloc(
+                    sizeof(VkPresentModeKHR) *
+                    renderer->vk_available_present_mode_count
+                );
+                assert(renderer->vk_available_present_modes != NULL && "Out of memory-- malloc failed.");
+            } else {
+                renderer->vk_available_present_modes = NULL;
+            }
+            vkGetPhysicalDeviceSurfacePresentModesKHR(
+                renderer->vk_physical_device,
+                renderer->vk_present_surface,
+                &renderer->vk_available_present_mode_count,
+                renderer->vk_available_present_modes
+            );
+
+            // checking that at least 1 format and present-mode exists:
+            swap_chain_adequate = (
+                (renderer->vk_available_format_count > 0) &&
+                (renderer->vk_available_present_mode_count > 0)
+            );
+            if (!swap_chain_adequate) {
+                goto fatal_error;
+            }
+        }
+
+        // Choosing format mode:
+        {
+            // if no ideal format can be found, default to the first available.
+            uint32_t ideal_index = 0;
+
+            // scanning for an ideal format, setting `ideal_index` if found:
+            for (uint32_t i = 0; i < renderer->vk_available_format_count; i++) {
+                bool ideal = (
+                    (renderer->vk_available_formats[i].format == VK_FORMAT_B8G8R8A8_SRGB) &&
+                    (renderer->vk_available_formats[i].colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+                );
+                if (ideal) {
+                    ideal_index = i;
+                    break;
+                }
+            }
+
+            // storing found ideal format on renderer:
+            renderer->vk_chosen_present_surface_format = renderer->vk_available_formats[ideal_index];
+        }
+
+        // Choosing present mode:
+        {
+            uint32_t ideal_index = renderer->vk_available_present_mode_count;
+            for (uint32_t i = 0; i < renderer->vk_available_present_mode_count; i++) {
+                bool ideal = (
+                    // triple buffering ideally
+                    renderer->vk_available_present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR
+                );
+                if (ideal) {
+                    ideal_index = i;
+                    break;
+                }
+            }
+            if (ideal_index == renderer->vk_available_present_mode_count) {
+                // no ideal present mode found. 
+                // Default to VK_PRESENT_MODE_FIFO_KHR, the only guaranteed available.
+                renderer->vk_chosen_present_surface_mode = VK_PRESENT_MODE_FIFO_KHR;
+            } else {
+                renderer->vk_chosen_present_surface_mode = renderer->vk_available_present_modes[ideal_index];
+            }
+        }
+
+        // Choosing swap extent:
+        {
+            if (renderer->vk_present_surface_capabilities.currentExtent.width != UINT32_MAX) {
+                // special case; pick best resolution from minImageExtent to maxImageExtent bounds.
+                renderer->vk_frame_extent = renderer->vk_present_surface_capabilities.currentExtent;
+            } else {
+                int width, height;
+                glfwGetFramebufferSize(
+                    wo_app_glfw_window(renderer->app), 
+                    &width, &height
+                );
+
+                // initializing width and height to the frame-buffer size:
+                renderer->vk_frame_extent.width = (uint32_t)width;
+                renderer->vk_frame_extent.height = (uint32_t)height;
+                
+                // clamping width and height against minimum/maximum allowed:
+                renderer->vk_frame_extent.width = MAX(
+                    renderer->vk_present_surface_capabilities.minImageExtent.width,
+                    renderer->vk_frame_extent.width
+                );
+                renderer->vk_frame_extent.width = MIN(
+                    renderer->vk_present_surface_capabilities.maxImageExtent.width,
+                    renderer->vk_frame_extent.width
+                );
+                renderer->vk_frame_extent.height = MAX(
+                    renderer->vk_present_surface_capabilities.minImageExtent.height,
+                    renderer->vk_frame_extent.height
+                );
+                renderer->vk_frame_extent.height = MIN(
+                    renderer->vk_present_surface_capabilities.maxImageExtent.height,
+                    renderer->vk_frame_extent.height
+                );
+            }
+        }
+
+        // Finally creating the chain:
+        {
+            // requesting number of images in the swap chain.
+            // always requesting 1 extra so the GPU is never starved for frames while we render (double-buffer or better)
+            // note '0' is a special value meaning no maximum.
+            uint32_t image_count = MIN(
+                1 + renderer->vk_present_surface_capabilities.minImageCount,
+                renderer->vk_present_surface_capabilities.maxImageCount
+            );
+
+            VkSwapchainCreateInfoKHR swapchain_create_info;
+            uint32_t queue_family_indices[2] = {
+                renderer->vk_graphics_queue_family_index,
+                renderer->vk_present_queue_family_index
+            };
+            {
+                swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+                swapchain_create_info.surface = renderer->vk_present_surface;
+                swapchain_create_info.minImageCount = image_count;
+                swapchain_create_info.imageFormat = renderer->vk_chosen_present_surface_format.format;
+                swapchain_create_info.imageColorSpace = renderer->vk_chosen_present_surface_format.colorSpace;
+                swapchain_create_info.imageExtent = renderer->vk_frame_extent;
+                swapchain_create_info.imageArrayLayers = 1;
+
+                // note: for postprocessing, use 'VK_IMAGE_USAGE_TRANSFER_DST_BIT' instead and use
+                //       a memory operation to transfer the rendered image to a swap chain image.
+                swapchain_create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            
+                if (renderer->vk_graphics_queue_family_index != renderer->vk_present_queue_family_index) {
+                    swapchain_create_info.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
+                    swapchain_create_info.queueFamilyIndexCount = 2;
+                    swapchain_create_info.pQueueFamilyIndices = queue_family_indices;
+                } else {
+                    swapchain_create_info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+                }
+
+                swapchain_create_info.preTransform = renderer->vk_present_surface_capabilities.currentTransform;
+                
+                // no transparent windows, thank you:
+                swapchain_create_info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+
+                swapchain_create_info.presentMode = renderer->vk_chosen_present_surface_mode;
+                
+                swapchain_create_info.clipped = VK_TRUE;
+
+                // do not handle resizing, i.e. only ever create one swapchain:
+                swapchain_create_info.oldSwapchain = VK_NULL_HANDLE;
+            }
+
+            VkResult result = vkCreateSwapchainKHR(
+                renderer->vk_device,
+                &swapchain_create_info, NULL, 
+                &renderer->vk_swapchain
+            );
+            if (result != VK_SUCCESS) {
+                printf("[Wololo] Failed to create a Vulkan swapchain.\n");
+                goto fatal_error;
+            } else {
+                printf(
+                    "[Wololo] Successfully create a Vulkan swapchain with extent [%u x %u]\n",
+                    renderer->vk_frame_extent.width,
+                    renderer->vk_frame_extent.height
+                );
+            }
+        }
+
+        // Acquiring and storing the created swapchain images:
+        {
+            // getting `renderer->vk_swapchain_images_count`
+            vkGetSwapchainImagesKHR(
+                renderer->vk_device,
+                renderer->vk_swapchain,
+                &renderer->vk_swapchain_images_count,
+                NULL
+            );
+
+            // allocating:
+            renderer->vk_swapchain_images = malloc(
+                sizeof(VkImage) *
+                renderer->vk_swapchain_images_count
+            );
+
+            // storing:
+            vkGetSwapchainImagesKHR(
+                renderer->vk_device,
+                renderer->vk_swapchain,
+                &renderer->vk_swapchain_images_count,
+                renderer->vk_swapchain_images
+            );
+        }
+    }
+
+    // todo: create image views
+    // https://vulkan-tutorial.com/en/Drawing_a_triangle/Presentation/Image_views
+    
   success:
     // reporting success, returning:
     printf("[Wololo] Successfully initialized Vulkan backend.\n");
@@ -584,6 +837,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
 }
 void del_renderer(Wo_Renderer* renderer) {
     if (renderer != NULL) {
+        if (renderer->vk_swapchain != VK_NULL_HANDLE) {
+            vkDestroySwapchainKHR(renderer->vk_device, renderer->vk_swapchain, NULL);
+        }
         if (renderer->vk_device != VK_NULL_HANDLE) {
             printf("[Wololo] Destroying Vulkan (logical) device\n");
             vkDestroyDevice(renderer->vk_device, NULL);
@@ -619,6 +875,14 @@ void del_renderer(Wo_Renderer* renderer) {
         if (renderer->vk_enabled_device_extension_names != NULL) {
             free(renderer->vk_enabled_device_extension_names);
             renderer->vk_enabled_device_extension_names = NULL;
+        }
+        if (renderer->vk_available_present_modes != NULL) {
+            free(renderer->vk_available_present_modes);
+            renderer->vk_available_present_modes = NULL;
+        }
+        if (renderer->vk_available_formats != NULL) {
+            free(renderer->vk_available_formats);
+            renderer->vk_available_formats = NULL;
         }
         printf("[Wololo] Destroying renderer \"%s\"\n", renderer->name);
         free(renderer);
