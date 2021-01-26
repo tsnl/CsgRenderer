@@ -12,6 +12,8 @@
 #include "wololo/platform.h"
 #include "wololo/app.h"
 
+#include "wololo/config.h"
+
 #include <vulkan/vulkan.h>
 
 #define MIN(A,B) (A < B ? A : B)
@@ -143,12 +145,24 @@ struct Wo_Renderer {
     VkSwapchainKHR vk_swapchain;
     uint32_t vk_swapchain_images_count;
     VkImage* vk_swapchain_images;
+    VkImageView* vk_swapchain_image_views;
+
+    // shader modules:
+    bool vk_shaders_loaded_ok;
+    VkShaderModule vk_vert_shader_module;
+    VkShaderModule vk_frag_shader_module;
+
+    // pipeline layout (for uniforms):
+    bool vk_pipeline_layout_created_ok;
+    VkPipelineLayout vk_pipeline_layout;
 };
 
 
 Wo_Renderer* new_renderer(Wo_App* app, char const* name, size_t max_node_count);
 Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count);
 Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer);
+VkShaderModule vk_load_shader_module(char const* file_path);
+
 void del_renderer(Wo_Renderer* renderer);
 bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node);
 void set_nonroot_node(Wo_Renderer* renderer, Wo_Node node);
@@ -822,10 +836,241 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
-    // todo: create image views
+    // creating image views (VkImageView):
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Presentation/Image_views
-    
-  success:
+    // to use any VkImage, need VkImageView
+    {
+        // first, allocating the vk_swapchain_image_views array
+        // s.t. there exists a unique image-view per image
+        renderer->vk_swapchain_image_views = NULL;
+        if (renderer->vk_swapchain_images_count > 0) {
+            renderer->vk_swapchain_image_views = malloc(
+                sizeof(VkImageView) *
+                renderer->vk_swapchain_images_count
+            );
+            assert(
+                renderer->vk_swapchain_image_views &&
+                "Allocation failed: renderer->vk_swapchain_image_views"
+            );
+        }
+
+        // then, calling on Vulkan to create, thereby populating the array:
+        for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
+            VkImageViewCreateInfo create_info;
+            create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            create_info.image = renderer->vk_swapchain_images[index];
+            create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            create_info.format = renderer->vk_chosen_present_surface_format.format;
+            
+            // each pixel is composed of one or more values corresponding to channels
+            // in the output image, e.g. red (R), green (G), blue (B), and alpha (A).
+            // 'swizzle' describes a linear transformation on a bit-vector, and just tells
+            // Vulkan how to access each component.
+            create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+            create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+            create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+            create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+            
+            // setting up mipmapping levels, or multiple layers (for stereographic 3D)
+            create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            create_info.subresourceRange.baseMipLevel = 0;
+            create_info.subresourceRange.levelCount = 1;
+            create_info.subresourceRange.baseArrayLayer = 0;
+            create_info.subresourceRange.layerCount = 1;
+            
+            // creating the VkImageView:
+            VkResult ok = vkCreateImageView(
+                renderer->vk_device, 
+                &create_info, 
+                NULL, 
+                &renderer->vk_swapchain_image_views[index]
+            );
+        }
+    }
+
+    // Rather than opt for multiple shaders, at this point, we just load a single
+    // ubershader that will act as a fixed-function GPU client.
+
+    // creating the shader module:
+    {
+        renderer->vk_vert_shader_module = vk_load_shader_module(WO_UBERSHADER_VERT_FILEPATH);
+        renderer->vk_frag_shader_module = vk_load_shader_module(WO_UBERSHADER_FRAG_FILEPATH);
+        renderer->vk_shaders_loaded_ok = true;
+    }
+
+    // todo: create render pass
+    {
+
+        //
+        //
+        //
+        //
+        //
+        // TODO: IMPLEMENT ME!
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Render_passes
+        //
+        //
+        //
+        //
+        //
+        //
+
+    }
+
+    // creating the graphics pipeline:
+    {
+        VkPipelineShaderStageCreateInfo vert_shader_stage_info;
+        vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vert_shader_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
+        vert_shader_stage_info.module = renderer->vk_vert_shader_module;
+        vert_shader_stage_info.pName = "main";
+        
+        VkPipelineShaderStageCreateInfo frag_shader_stage_info;
+        vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        vert_shader_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        vert_shader_stage_info.module = renderer->vk_frag_shader_module;
+        vert_shader_stage_info.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shader_stages[] = {
+            vert_shader_stage_info,
+            frag_shader_stage_info
+        };
+
+        // loading vertex shader data:
+        // (currently no data to load)
+        // (not entirely sure how this is different from uniforms, but it gets baked aot)
+        VkPipelineVertexInputStateCreateInfo vertex_input_info;
+        vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        vertex_input_info.vertexBindingDescriptionCount = 0;
+        vertex_input_info.pVertexBindingDescriptions = NULL;
+        vertex_input_info.vertexAttributeDescriptionCount = 0;
+        vertex_input_info.pVertexAttributeDescriptions = NULL;
+
+        // specifying the input assembly, incl.
+        // - pipeline 'topology': what geometric primitives to draw
+        VkPipelineInputAssemblyStateCreateInfo input_assembly;
+        input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        input_assembly.primitiveRestartEnable = VK_FALSE;
+
+        // specifying the viewport size (the whole monitor * DPI):
+        VkViewport viewport;
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = (float)renderer->vk_frame_extent.width;
+        viewport.height = (float)renderer->vk_frame_extent.height;
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+
+        // specifying the scissor rectangle: anything outside the scissor is 
+        // discarded by the rasterizer:
+        VkRect2D scissor;
+        scissor.offset.x = 0;
+        scissor.offset.y = 0;
+        scissor.extent = renderer->vk_frame_extent;
+
+        // tying it all together, setting up the viewport(s):
+        // just one
+        VkPipelineViewportStateCreateInfo viewport_state_create_info;
+        viewport_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+        viewport_state_create_info.viewportCount = 1;
+        viewport_state_create_info.pViewports = &viewport;
+        viewport_state_create_info.scissorCount = 1;
+        viewport_state_create_info.pScissors = &scissor;
+
+        // setting up the rasterizer:
+        VkPipelineRasterizationStateCreateInfo rasterizer_create_info;
+        rasterizer_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer_create_info.depthClampEnable = VK_FALSE;
+        rasterizer_create_info.rasterizerDiscardEnable = VK_FALSE;
+        rasterizer_create_info.polygonMode = VK_POLYGON_MODE_FILL;
+        // note: using any fill mode other than fill requires specifying lineWidth;
+        // filled anyway for safety:
+        rasterizer_create_info.lineWidth = 1.0f;
+        // setting cull mode:
+        rasterizer_create_info.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer_create_info.frontFace = VK_FRONT_FACE_CLOCKWISE;
+        // disabling depth bias,
+        rasterizer_create_info.depthBiasEnable = VK_FALSE;
+        // optional properties to config depthBias:
+        rasterizer_create_info.depthBiasConstantFactor = 0.0f;
+        rasterizer_create_info.depthBiasClamp = 0.0f;
+        rasterizer_create_info.depthBiasSlopeFactor = 0.0f;
+
+        // setting up multisampling (disabled)
+        VkPipelineMultisampleStateCreateInfo multisampling_create_info;
+        multisampling_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+        multisampling_create_info.sampleShadingEnable = VK_FALSE;
+        multisampling_create_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        multisampling_create_info.minSampleShading = 1.0f;
+        multisampling_create_info.pSampleMask = NULL;
+        multisampling_create_info.alphaToCoverageEnable = VK_FALSE;
+        multisampling_create_info.alphaToOneEnable = VK_FALSE;
+
+        // disabling depth testing; will ignore
+        // VkPipelineDepthStencilStateCreateInfo
+
+        // color blending: no alpha
+        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions#page_Color-blending
+        VkPipelineColorBlendAttachmentState color_blend_attachment;
+        color_blend_attachment.colorWriteMask = (
+            VK_COLOR_COMPONENT_R_BIT |
+            VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT |
+            VK_COLOR_COMPONENT_A_BIT
+        );
+        color_blend_attachment.blendEnable = VK_FALSE;
+        color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+        color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+
+        VkPipelineColorBlendStateCreateInfo color_blending_create_info;
+        color_blending_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+        color_blending_create_info.logicOpEnable = VK_FALSE;
+        color_blending_create_info.logicOp = VK_LOGIC_OP_COPY;
+        color_blending_create_info.attachmentCount = 1;
+        color_blending_create_info.pAttachments = &color_blend_attachment;
+        color_blending_create_info.blendConstants[0] = 0.0f;
+        color_blending_create_info.blendConstants[1] = 0.0f;
+        color_blending_create_info.blendConstants[2] = 0.0f;
+        color_blending_create_info.blendConstants[3] = 0.0f;
+
+        // in order to change the above properties, we must specify which states are dynamic:
+        VkDynamicState dynamic_states[] = {
+            VK_DYNAMIC_STATE_VIEWPORT
+        };
+        VkPipelineDynamicStateCreateInfo dynamic_state;
+        dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+        dynamic_state.dynamicStateCount = 1;
+        dynamic_state.pDynamicStates = dynamic_states;
+
+        // setting up pipeline layout (for uniforms)
+        VkPipelineLayoutCreateInfo pipeline_layout_create_info;
+        pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipeline_layout_create_info.setLayoutCount = 0;
+        pipeline_layout_create_info.pSetLayouts = NULL;
+        pipeline_layout_create_info.pushConstantRangeCount = 0;
+        pipeline_layout_create_info.pPushConstantRanges = NULL;
+        pipeline_layout_create_info.flags = 0;
+        pipeline_layout_create_info.pNext = NULL;
+        VkResult pipeline_create_ok = vkCreatePipelineLayout(
+            renderer->vk_device,
+            &pipeline_layout_create_info,
+            NULL,
+            &renderer->vk_pipeline_layout
+        );
+        if (pipeline_create_ok != VK_SUCCESS) {
+            assert(0 && "Failed to create pipeline layout.");
+        } else {
+            renderer->vk_pipeline_layout_created_ok = true;
+        }
+    }
+
+  // should never jump to this label, just flow into naturally.    
+  _success:
     // reporting success, returning:
     printf("[Wololo] Successfully initialized Vulkan backend.\n");
     return renderer;
@@ -835,10 +1080,93 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     del_renderer(renderer);
     return NULL;
 }
+VkShaderModule vk_load_shader_module(char const* file_path) {
+    // loading all bytecode:
+    char* buffer;
+    size_t code_size;
+    {
+        // attempting to open the shader:
+        FILE* shader_file = fopen(file_path, "r");
+        assert(shader_file && "Failed to open a shader.");
+
+        // creating a buffer based on the maximum file size:
+        fseek(shader_file, 0, SEEK_END);
+        size_t max_buffer_size = ftell(shader_file);
+        buffer = malloc(max_buffer_size);
+
+        // (resetting the cursor back to the beginning of the file stream)
+        fseek(shader_file, 0, SEEK_SET);
+
+        // reading all the file's content into the buffer:
+        size_t out_index = 0;
+        while (!feof(shader_file)) {
+            int ch = fgetc(shader_file);
+            if (ch <= 0) {
+                break;
+            } else {
+                buffer[out_index++] = ch;
+            }
+        }
+        code_size = out_index;
+        
+        // note that SPIR-V is a binary format, so it does not need a null-terminating
+        // byte.
+    }
+    
+    VkShaderModule shader_module;
+    {
+        VkShaderModuleCreateInfo create_info;
+        create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        create_info.codeSize = code_size;
+        create_info.pCode = (uint32_t const*)buffer;
+    }
+    
+    // all done:
+    free(buffer);
+    return shader_module;
+}
 void del_renderer(Wo_Renderer* renderer) {
     if (renderer != NULL) {
+        // see:
+        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions#page_Dynamic-state
+        if (renderer->vk_pipeline_layout_created_ok) {
+            vkDestroyPipelineLayout(
+                renderer->vk_device,
+                renderer->vk_pipeline_layout,
+                NULL
+            );
+        }
+
+        // see:
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Shader_modules
+        if (renderer->vk_shaders_loaded_ok) {
+            vkDestroyShaderModule(
+                renderer->vk_device,
+                renderer->vk_vert_shader_module,
+                NULL
+            );
+            vkDestroyShaderModule(
+                renderer->vk_device,
+                renderer->vk_frag_shader_module,
+                NULL
+            );
+            renderer->vk_shaders_loaded_ok = false;
+        }
+
+        if (renderer->vk_swapchain_image_views != NULL) {
+            for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
+                vkDestroyImageView(
+                    renderer->vk_device,
+                    renderer->vk_swapchain_image_views[index],
+                    NULL
+                );
+            }
+            free(renderer->vk_swapchain_image_views);
+        }
         if (renderer->vk_swapchain != VK_NULL_HANDLE) {
             vkDestroySwapchainKHR(renderer->vk_device, renderer->vk_swapchain, NULL);
+            free(renderer->vk_swapchain_images);
+            renderer->vk_swapchain_images_count = 0;
         }
         if (renderer->vk_device != VK_NULL_HANDLE) {
             printf("[Wololo] Destroying Vulkan (logical) device\n");

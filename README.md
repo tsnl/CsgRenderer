@@ -9,6 +9,10 @@ high-quality rendered images, and allow me to explore temporal filtering.
 # Build
 
 - Download, then install the Vulkan SDK (platform-specific)
+    -   Note: on macOS, ensure you configure the environment variables `VULKAN_SDK` and `DYLD_LIBRARY_PATH` 
+        correctly..
+        See `https://vulkan.lunarg.com/doc/view/1.1.108.0/mac/getting_started.html`
+
 - Install CMake.
 - Use CMake to configure and build:
     ```
