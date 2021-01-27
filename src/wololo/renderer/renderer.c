@@ -49,6 +49,23 @@ static char const* optional_vk_device_extension_names[OPTIONAL_VK_DEVICE_EXTENSI
     // 'VK_KHR_get_physical_device_properties2' is required.
 };
 
+// creating a Vulkan error callback:
+// see: https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Validation_layers#page_Message-callback
+static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+    VkDebugUtilsMessageTypeFlagsEXT message_type,
+    VkDebugUtilsMessengerCallbackDataEXT const* callback_data_ref,
+    void* user_data
+) {
+    if (message_severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
+        printf(
+            "[Wololo][Vulkan-Validation] %s\n",
+            callback_data_ref->pMessage
+        );
+    }
+    return VK_TRUE;
+}
+
 //
 // Nodes: representation of an algebraic expression
 //
@@ -140,12 +157,16 @@ struct Wo_Renderer {
     
     // chosen swap-extent/aka framebuffer size:
     VkExtent2D vk_frame_extent;
+    VkViewport vk_viewport;
 
     // the swapchain:
     VkSwapchainKHR vk_swapchain;
     uint32_t vk_swapchain_images_count;
     VkImage* vk_swapchain_images;
     VkImageView* vk_swapchain_image_views;
+    // the swapchain's framebuffers:
+    VkFramebuffer* vk_swapchain_framebuffers;
+    uint32_t vk_swapchain_fbs_ok_count;
 
     // shader modules:
     bool vk_shaders_loaded_ok;
@@ -155,13 +176,25 @@ struct Wo_Renderer {
     // pipeline layout (for uniforms):
     bool vk_pipeline_layout_created_ok;
     VkPipelineLayout vk_pipeline_layout;
+    VkRenderPass vk_render_pass;
+    bool vk_render_pass_ok;
+
+    // the graphics pipeline
+    VkPipeline vk_graphics_pipeline;
+    bool vk_graphics_pipeline_ok;
+    
+    // command pools:
+    VkCommandPool vk_command_buffer_pool;
+    bool vk_command_buffer_pool_ok;
+    VkCommandBuffer* vk_command_buffers;
+    bool vk_command_buffers_ok;
 };
 
 
 Wo_Renderer* new_renderer(Wo_App* app, char const* name, size_t max_node_count);
 Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count);
 Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer);
-VkShaderModule vk_load_shader_module(char const* file_path);
+VkShaderModule vk_load_shader_module(Wo_Renderer* renderer, char const* file_path);
 
 void del_renderer(Wo_Renderer* renderer);
 bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node);
@@ -236,7 +269,7 @@ Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count) {
 Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     // setting ambient state variables:
     renderer->app = app;
-    renderer->are_vk_validation_layers_enabled = true;
+    renderer->are_vk_validation_layers_enabled = WO_DEBUG;
 
     // we know all pointers are NULL-initialized, so if non-NULL, we know there's an error.
 
@@ -255,8 +288,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             app_info.apiVersion = VK_API_VERSION_1_0;
         }
 
-        VkInstanceCreateInfo create_info = {0}; 
-        {
+        VkInstanceCreateInfo create_info = {0}; {
             create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
             create_info.pApplicationInfo = &app_info;
             create_info.enabledLayerCount = 0;
@@ -276,8 +308,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                     &available_validation_layer_count, 
                     NULL
                 );
-                renderer->vk_available_validation_layers = malloc(
-                    available_validation_layer_count * sizeof(VkLayerProperties)
+                renderer->vk_available_validation_layers = calloc(
+                    available_validation_layer_count * sizeof(VkLayerProperties),
+                    1
                 );
                 vkEnumerateInstanceLayerProperties(
                     &available_validation_layer_count, 
@@ -286,8 +319,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 
                 // tallying each available validation layer:
                 renderer->vk_enabled_validation_layer_count = 0;
-                renderer->vk_enabled_validation_layer_names = malloc(
-                    DEFAULT_VK_VALIDATION_LAYER_COUNT * sizeof(char const*)
+                renderer->vk_enabled_validation_layer_names = calloc(
+                    DEFAULT_VK_VALIDATION_LAYER_COUNT * sizeof(char const*),
+                    1
                 );
                 for (uint32_t index = 0; index < DEFAULT_VK_VALIDATION_LAYER_COUNT; index++) {
                     char const* req_name = default_vk_validation_layer_names[index];
@@ -312,7 +346,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                     }
                 }
 
-                // setting properties:
+                // setting create_info properties to give validation layers to Vulkan:
                 create_info.enabledLayerCount = renderer->vk_enabled_validation_layer_count;
                 create_info.ppEnabledLayerNames = renderer->vk_enabled_validation_layer_names;
             } else {
@@ -328,7 +362,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
-    // selecting a physical device:
+    // skipping 'setupDebugMessenger'; we're stdout heathen here. :)
+
+    // picking a physical device:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
     {
         // querying all physical devices:
@@ -343,8 +379,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
         
         // enumerating all physical devices:
-        renderer->vk_physical_devices = malloc(
-            renderer->vk_physical_device_count * 
+        renderer->vk_physical_devices = calloc(
+            renderer->vk_physical_device_count,
             sizeof(VkPhysicalDevice)
         );
         vkEnumeratePhysicalDevices(
@@ -371,78 +407,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
     
-    // Creating a software surface for the window:
-    // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface#page_Querying-for-presentation-support
-    {
-        // renderer->vk_present_surface:
-        GLFWwindow* glfw_window = wo_app_glfw_window(renderer->app);
-        VkResult result = glfwCreateWindowSurface(
-            renderer->vk_instance,
-            glfw_window,
-            NULL,
-            &renderer->vk_present_surface
-        );
-        if (result != VK_SUCCESS) {
-            printf("[Wololo] Failed to create Vulkan surface using GLFW.\n");
-            goto fatal_error;
-        }
-    }
-
-    // checking the device's queue properties:
-    // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
-    {   
-        uint32_t queue_family_count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, NULL);
-        renderer->vk_queue_family_count = queue_family_count;
-        renderer->vk_graphics_queue_family_index = renderer->vk_queue_family_count;
-        renderer->vk_present_queue_family_index = renderer->vk_queue_family_count;
-        
-        renderer->vk_queue_family_properties = malloc(queue_family_count * sizeof(VkQueueFamilyProperties));
-        vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, renderer->vk_queue_family_properties);
-
-        for (uint32_t index = 0; index < renderer->vk_queue_family_count; index++) {
-            VkQueueFamilyProperties family_properties = renderer->vk_queue_family_properties[index];
-            if (family_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
-                renderer->vk_graphics_queue_family_index = index;
-            }
-
-            VkBool32 present_supported = false;
-            vkGetPhysicalDeviceSurfaceSupportKHR(
-                renderer->vk_physical_device,
-                index,
-                renderer->vk_present_surface,
-                &present_supported
-            );
-            if (present_supported) {
-                renderer->vk_present_queue_family_index = index;
-            }
-
-            // if all indices have been assigned, we needn't search further:
-            bool indices_are_complete = (
-                (renderer->vk_graphics_queue_family_index != renderer->vk_queue_family_count) &&
-                (renderer->vk_present_queue_family_index != renderer->vk_queue_family_count) &&
-                (true)
-            );
-            if (indices_are_complete) {
-                break;
-            }
-        }
-        if (renderer->vk_graphics_queue_family_index == renderer->vk_queue_family_count) {
-            printf("[Wololo] No queue family with VK_QUEUE_GRAPHICS_BIT was found.\n");
-            goto fatal_error;
-        } else {
-            printf("[Wololo] Vulkan graphics queue loaded.\n");
-        }
-        if (renderer->vk_present_queue_family_index == renderer->vk_queue_family_count) {
-            printf("[Wololo] No queue family with VK_QUEUE_PRESENT_BIT was found.\n");
-            goto fatal_error;
-        } else {
-            printf("[Wololo] Vulkan present queue loaded.\n");
-        }
-    }
-
-    // setting up a logical device to interface with the physical device
-    // using the queue indices:
+    // creating a logical device, setting command queues + queue indices:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Logical_device_and_queues
     {
         VkDeviceQueueCreateInfo queue_create_info = {};
@@ -475,8 +440,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         );
         
         // allocating + filling 'renderer->vk_available_device_extensions':
-        renderer->vk_available_device_extensions = malloc(
-            sizeof(VkExtensionProperties) *
+        renderer->vk_available_device_extensions = calloc(
+            sizeof(VkExtensionProperties),
             renderer->vk_available_device_extension_count
         );
         vkEnumerateDeviceExtensionProperties(
@@ -485,7 +450,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             renderer->vk_available_device_extensions
         );
 
-        bool const debug_print_all_available_exts = true;
+        bool const debug_print_all_available_exts = false;
         if (debug_print_all_available_exts) {
             uint32_t ext_count = renderer->vk_available_device_extension_count;
             printf("[Vulkan] %d extensions found:\n", ext_count);
@@ -503,7 +468,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             OPTIONAL_VK_DEVICE_EXTENSION_COUNT
         );
         renderer->vk_enabled_device_extension_count = 0;
-        renderer->vk_enabled_device_extension_names = malloc(max_extension_count * sizeof(char const*));
+        renderer->vk_enabled_device_extension_names = calloc(max_extension_count, sizeof(char const*));
         for (uint32_t min_ext_index = 0; min_ext_index < MINIMUM_VK_DEVICE_EXTENSION_COUNT; min_ext_index++) {
             char const* ext_name = minimum_vk_device_extension_names[min_ext_index];
             
@@ -578,26 +543,99 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
-    // Retrieving queue handles:
+    // creating a window surface to present to:
+    // https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface#page_Querying-for-presentation-support
     {
-        // renderer->vk_graphics_queue:
-        vkGetDeviceQueue(
-            renderer->vk_device,
-            renderer->vk_graphics_queue_family_index,
-            0,
-            &renderer->vk_graphics_queue
+        // renderer->vk_present_surface:
+        GLFWwindow* glfw_window = wo_app_glfw_window(renderer->app);
+        VkResult result = glfwCreateWindowSurface(
+            renderer->vk_instance,
+            glfw_window,
+            NULL,
+            &renderer->vk_present_surface
         );
-
-        // renderer->vk_present_queue:
-        vkGetDeviceQueue(
-            renderer->vk_device,
-            renderer->vk_present_queue_family_index,
-            0,
-            &renderer->vk_present_queue
-        );
+        if (result != VK_SUCCESS) {
+            printf("[Wololo] Failed to create Vulkan surface using GLFW.\n");
+            goto fatal_error;
+        }
     }
 
-    // Creating the swapchain:
+    // assigning device queues using the new surface:
+    {
+        // checking the device's queue properties:
+        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
+        {   
+            uint32_t queue_family_count = 0;
+            vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, NULL);
+            renderer->vk_queue_family_count = queue_family_count;
+            renderer->vk_graphics_queue_family_index = renderer->vk_queue_family_count;
+            renderer->vk_present_queue_family_index = renderer->vk_queue_family_count;
+            
+            renderer->vk_queue_family_properties = calloc(queue_family_count, sizeof(VkQueueFamilyProperties));
+            vkGetPhysicalDeviceQueueFamilyProperties(renderer->vk_physical_device, &queue_family_count, renderer->vk_queue_family_properties);
+
+            for (uint32_t index = 0; index < renderer->vk_queue_family_count; index++) {
+                VkQueueFamilyProperties family_properties = renderer->vk_queue_family_properties[index];
+                if (family_properties.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+                    renderer->vk_graphics_queue_family_index = index;
+                }
+
+                VkBool32 present_supported = false;
+                vkGetPhysicalDeviceSurfaceSupportKHR(
+                    renderer->vk_physical_device,
+                    index,
+                    renderer->vk_present_surface,
+                    &present_supported
+                );
+                if (present_supported) {
+                    renderer->vk_present_queue_family_index = index;
+                }
+
+                // if all indices have been assigned, we needn't search further:
+                bool indices_are_complete = (
+                    (renderer->vk_graphics_queue_family_index != renderer->vk_queue_family_count) &&
+                    (renderer->vk_present_queue_family_index != renderer->vk_queue_family_count) &&
+                    (true)
+                );
+                if (indices_are_complete) {
+                    break;
+                }
+            }
+            if (renderer->vk_graphics_queue_family_index == renderer->vk_queue_family_count) {
+                printf("[Wololo] No queue family with VK_QUEUE_GRAPHICS_BIT was found.\n");
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan graphics queue loaded.\n");
+            }
+            if (renderer->vk_present_queue_family_index == renderer->vk_queue_family_count) {
+                printf("[Wololo] No queue family with VK_QUEUE_PRESENT_BIT was found.\n");
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan present queue loaded.\n");
+            }
+        }
+
+        // getting the device queue:
+        {
+            // renderer->vk_graphics_queue:
+            vkGetDeviceQueue(
+                renderer->vk_device,
+                renderer->vk_graphics_queue_family_index,
+                0,
+                &renderer->vk_graphics_queue
+            );
+
+            // renderer->vk_present_queue:
+            vkGetDeviceQueue(
+                renderer->vk_device,
+                renderer->vk_present_queue_family_index,
+                0,
+                &renderer->vk_present_queue
+            );
+        }
+    }
+
+    // creating the swapchain:
     {
         // Querying GPU swap chain capabilities:
         bool swap_chain_adequate = false;
@@ -617,11 +655,11 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 NULL
             );
             if (renderer->vk_available_format_count > 0) {
-                renderer->vk_available_formats = malloc(
-                    sizeof(VkSurfaceFormatKHR) * 
+                renderer->vk_available_formats = calloc(
+                    sizeof(VkSurfaceFormatKHR),
                     renderer->vk_available_format_count
                 );
-                assert(renderer->vk_available_formats != NULL && "Out of memory-- malloc failed.");
+                assert(renderer->vk_available_formats != NULL && "Out of memory-- calloc failed.");
             } else {
                 renderer->vk_available_formats = NULL;
             }
@@ -640,11 +678,11 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 NULL
             );
             if (renderer->vk_available_present_mode_count > 0) {
-                renderer->vk_available_present_modes = malloc(
-                    sizeof(VkPresentModeKHR) *
+                renderer->vk_available_present_modes = calloc(
+                    sizeof(VkPresentModeKHR),
                     renderer->vk_available_present_mode_count
                 );
-                assert(renderer->vk_available_present_modes != NULL && "Out of memory-- malloc failed.");
+                assert(renderer->vk_available_present_modes != NULL && "Out of memory-- calloc failed.");
             } else {
                 renderer->vk_available_present_modes = NULL;
             }
@@ -665,7 +703,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             }
         }
 
-        // Choosing format mode:
+        // Choosing present format:
         {
             // if no ideal format can be found, default to the first available.
             uint32_t ideal_index = 0;
@@ -742,10 +780,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                     renderer->vk_frame_extent.height
                 );
             }
-        }
 
-        // Finally creating the chain:
-        {
+            // Finally creating the swapchain:
+        
             // requesting number of images in the swap chain.
             // always requesting 1 extra so the GPU is never starved for frames while we render (double-buffer or better)
             // note '0' is a special value meaning no maximum.
@@ -810,9 +847,9 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             }
         }
 
-        // Acquiring and storing the created swapchain images:
+        // Retrieving the created swapchain's images:
         {
-            // getting `renderer->vk_swapchain_images_count`
+            // setting `renderer->vk_swapchain_images_count`
             vkGetSwapchainImagesKHR(
                 renderer->vk_device,
                 renderer->vk_swapchain,
@@ -821,22 +858,32 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             );
 
             // allocating:
-            renderer->vk_swapchain_images = malloc(
-                sizeof(VkImage) *
+            renderer->vk_swapchain_images = calloc(
+                sizeof(VkImage),
                 renderer->vk_swapchain_images_count
             );
 
-            // storing:
-            vkGetSwapchainImagesKHR(
+            // setting vk_swapchain_images:
+            VkResult swapchain_images_ok = vkGetSwapchainImagesKHR(
                 renderer->vk_device,
                 renderer->vk_swapchain,
                 &renderer->vk_swapchain_images_count,
                 renderer->vk_swapchain_images
             );
+            if (swapchain_images_ok != VK_SUCCESS) {
+                printf("[Wololo] Failed to create Vulkan swapchain images.\n");
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan swapchain images created successfully.\n");
+            }
         }
     }
 
-    // creating image views (VkImageView):
+    //
+    // Presentation
+    //
+
+    // creating image views:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Presentation/Image_views
     // to use any VkImage, need VkImageView
     {
@@ -844,8 +891,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         // s.t. there exists a unique image-view per image
         renderer->vk_swapchain_image_views = NULL;
         if (renderer->vk_swapchain_images_count > 0) {
-            renderer->vk_swapchain_image_views = malloc(
-                sizeof(VkImageView) *
+            renderer->vk_swapchain_image_views = calloc(
+                sizeof(VkImageView),
                 renderer->vk_swapchain_images_count
             );
             assert(
@@ -885,53 +932,112 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 NULL, 
                 &renderer->vk_swapchain_image_views[index]
             );
+            if (ok != VK_SUCCESS) {
+                printf("[Wololo] Failed to create Vulkan image view %zu/%u.\n", index+1, renderer->vk_swapchain_images_count);
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan image view %zu/%u created successfully.\n", index+1, renderer->vk_swapchain_images_count);
+            }
         }
     }
+
+    // create render pass
+    {
+        // add a single color bufer attachment, represented by an image from the swapchain:
+        VkAttachmentDescription color_attachment_desc;
+        {
+            color_attachment_desc.format = renderer->vk_chosen_present_surface_format.format;
+            color_attachment_desc.samples = VK_SAMPLE_COUNT_1_BIT;
+            // loadOp and storeOp used for color and depth
+            color_attachment_desc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            color_attachment_desc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            // forsake the stencil buffer:
+            color_attachment_desc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            color_attachment_desc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            // setting the final layout to a 'present' image layout:
+            color_attachment_desc.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            color_attachment_desc.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+            // not mentioned in tutorial:
+            color_attachment_desc.flags = 0;
+        }
+
+        // creating one sub-pass:
+        VkSubpassDescription subpass_desc;
+        {
+            VkAttachmentReference color_attachment_ref;
+            color_attachment_ref.attachment = 0;
+            color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            // zero-ing out and filling relevant fields:
+            memset(&subpass_desc, 0, sizeof(subpass_desc));
+            subpass_desc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+            subpass_desc.colorAttachmentCount = 1;
+            subpass_desc.pColorAttachments = &color_attachment_ref;
+        }
+
+        VkRenderPassCreateInfo render_pass_create_info;
+        {
+            memset(&render_pass_create_info, 0, sizeof(render_pass_create_info));
+            render_pass_create_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+            render_pass_create_info.attachmentCount = 1;
+            render_pass_create_info.pAttachments = &color_attachment_desc;
+            render_pass_create_info.subpassCount = 1;
+            render_pass_create_info.pSubpasses = &subpass_desc;
+
+            VkResult render_pass_ok = vkCreateRenderPass(
+                renderer->vk_device,
+                &render_pass_create_info,
+                NULL,
+                &renderer->vk_render_pass
+            );
+            if (render_pass_ok != VK_SUCCESS) {
+                printf("[Wololo] Failed to create a Vulkan Render Pass\n");
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan render pass created successfully.\n");
+                renderer->vk_render_pass_ok = true;
+            }
+        }
+    }
+
+    // 
+    // Creating + Initializing the Graphics Pipeline:
+    //
 
     // Rather than opt for multiple shaders, at this point, we just load a single
     // ubershader that will act as a fixed-function GPU client.
 
-    // creating the shader module:
-    {
-        renderer->vk_vert_shader_module = vk_load_shader_module(WO_UBERSHADER_VERT_FILEPATH);
-        renderer->vk_frag_shader_module = vk_load_shader_module(WO_UBERSHADER_FRAG_FILEPATH);
-        renderer->vk_shaders_loaded_ok = true;
-    }
-
-    // todo: create render pass
-    {
-
-        //
-        //
-        //
-        //
-        //
-        // TODO: IMPLEMENT ME!
-        // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Render_passes
-        //
-        //
-        //
-        //
-        //
-        //
-
-    }
-
     // creating the graphics pipeline:
     {
+        // loading shaders:
+        renderer->vk_shaders_loaded_ok = false;
+        renderer->vk_vert_shader_module = vk_load_shader_module(renderer, WO_UBERSHADER_VERT_FILEPATH);
+        renderer->vk_frag_shader_module = vk_load_shader_module(renderer, WO_UBERSHADER_FRAG_FILEPATH);
+        if (renderer->vk_vert_shader_module == VK_NULL_HANDLE) {
+            printf("[Wololo] Failed to load Vulkan vertex uber-shader.\n");
+            goto fatal_error;
+        } else if (renderer->vk_frag_shader_module == VK_NULL_HANDLE) {
+            printf("[Wololo] Failed to load Vulkan fragment uber-shader.\n");
+            goto fatal_error;
+        } else {
+            renderer->vk_shaders_loaded_ok = true;
+        }
+
         VkPipelineShaderStageCreateInfo vert_shader_stage_info;
+        memset(&vert_shader_stage_info, 0, sizeof(vert_shader_stage_info));
         vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         vert_shader_stage_info.stage = VK_SHADER_STAGE_VERTEX_BIT;
         vert_shader_stage_info.module = renderer->vk_vert_shader_module;
         vert_shader_stage_info.pName = "main";
-        
-        VkPipelineShaderStageCreateInfo frag_shader_stage_info;
-        vert_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        vert_shader_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-        vert_shader_stage_info.module = renderer->vk_frag_shader_module;
-        vert_shader_stage_info.pName = "main";
 
-        VkPipelineShaderStageCreateInfo shader_stages[] = {
+        VkPipelineShaderStageCreateInfo frag_shader_stage_info;
+        memset(&frag_shader_stage_info, 0, sizeof(frag_shader_stage_info));
+        frag_shader_stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        frag_shader_stage_info.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        frag_shader_stage_info.module = renderer->vk_frag_shader_module;
+        frag_shader_stage_info.pName = "main";
+
+        VkPipelineShaderStageCreateInfo shader_stages[2] = {
             vert_shader_stage_info,
             frag_shader_stage_info
         };
@@ -939,123 +1045,141 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         // loading vertex shader data:
         // (currently no data to load)
         // (not entirely sure how this is different from uniforms, but it gets baked aot)
-        VkPipelineVertexInputStateCreateInfo vertex_input_info;
-        vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-        vertex_input_info.vertexBindingDescriptionCount = 0;
-        vertex_input_info.pVertexBindingDescriptions = NULL;
-        vertex_input_info.vertexAttributeDescriptionCount = 0;
-        vertex_input_info.pVertexAttributeDescriptions = NULL;
+        VkPipelineVertexInputStateCreateInfo vertex_input_info; {
+            memset(&vertex_input_info, 0, sizeof(vertex_input_info));
+            vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            vertex_input_info.vertexBindingDescriptionCount = 0;
+            vertex_input_info.pVertexBindingDescriptions = NULL;
+            vertex_input_info.vertexAttributeDescriptionCount = 0;
+            vertex_input_info.pVertexAttributeDescriptions = NULL;
+        }
 
         // specifying the input assembly, incl.
         // - pipeline 'topology': what geometric primitives to draw
-        VkPipelineInputAssemblyStateCreateInfo input_assembly;
-        input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        input_assembly.primitiveRestartEnable = VK_FALSE;
+        VkPipelineInputAssemblyStateCreateInfo input_assembly; {
+            memset(&input_assembly, 0, sizeof(input_assembly));
+            input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+            input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            input_assembly.primitiveRestartEnable = VK_FALSE;
+        }
 
         // specifying the viewport size (the whole monitor * DPI):
-        VkViewport viewport;
-        viewport.x = 0.0f;
-        viewport.y = 0.0f;
-        viewport.width = (float)renderer->vk_frame_extent.width;
-        viewport.height = (float)renderer->vk_frame_extent.height;
-        viewport.minDepth = 0.0f;
-        viewport.maxDepth = 1.0f;
+        {
+            renderer->vk_viewport.x = 0.0f;
+            renderer->vk_viewport.y = 0.0f;
+            renderer->vk_viewport.width = (float)renderer->vk_frame_extent.width;
+            renderer->vk_viewport.height = (float)renderer->vk_frame_extent.height;
+            renderer->vk_viewport.minDepth = 0.0f;
+            renderer->vk_viewport.maxDepth = 1.0f;
+        }
 
         // specifying the scissor rectangle: anything outside the scissor is 
         // discarded by the rasterizer:
-        VkRect2D scissor;
-        scissor.offset.x = 0;
-        scissor.offset.y = 0;
-        scissor.extent = renderer->vk_frame_extent;
+        VkRect2D scissor; {
+            scissor.offset.x = 0;
+            scissor.offset.y = 0;
+            scissor.extent = renderer->vk_frame_extent;
+        }
 
         // tying it all together, setting up the viewport(s):
         // just one
-        VkPipelineViewportStateCreateInfo viewport_state_create_info;
-        viewport_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        viewport_state_create_info.viewportCount = 1;
-        viewport_state_create_info.pViewports = &viewport;
-        viewport_state_create_info.scissorCount = 1;
-        viewport_state_create_info.pScissors = &scissor;
+        VkPipelineViewportStateCreateInfo viewport_state_create_info; {
+            memset(&viewport_state_create_info, 0, sizeof(viewport_state_create_info));
+            viewport_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+            viewport_state_create_info.viewportCount = 1;
+            viewport_state_create_info.pViewports = &renderer->vk_viewport;
+            viewport_state_create_info.scissorCount = 1;
+            viewport_state_create_info.pScissors = &scissor;
+        }
 
         // setting up the rasterizer:
-        VkPipelineRasterizationStateCreateInfo rasterizer_create_info;
-        rasterizer_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rasterizer_create_info.depthClampEnable = VK_FALSE;
-        rasterizer_create_info.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer_create_info.polygonMode = VK_POLYGON_MODE_FILL;
-        // note: using any fill mode other than fill requires specifying lineWidth;
-        // filled anyway for safety:
-        rasterizer_create_info.lineWidth = 1.0f;
-        // setting cull mode:
-        rasterizer_create_info.cullMode = VK_CULL_MODE_BACK_BIT;
-        rasterizer_create_info.frontFace = VK_FRONT_FACE_CLOCKWISE;
-        // disabling depth bias,
-        rasterizer_create_info.depthBiasEnable = VK_FALSE;
-        // optional properties to config depthBias:
-        rasterizer_create_info.depthBiasConstantFactor = 0.0f;
-        rasterizer_create_info.depthBiasClamp = 0.0f;
-        rasterizer_create_info.depthBiasSlopeFactor = 0.0f;
+        VkPipelineRasterizationStateCreateInfo rasterizer_create_info; {
+            memset(&rasterizer_create_info, 0, sizeof(rasterizer_create_info));
+            rasterizer_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+            rasterizer_create_info.depthClampEnable = VK_FALSE;
+            rasterizer_create_info.rasterizerDiscardEnable = VK_FALSE;
+            rasterizer_create_info.polygonMode = VK_POLYGON_MODE_FILL;
+            // note: using any fill mode other than fill requires specifying lineWidth;
+            // filled anyway for safety:
+            rasterizer_create_info.lineWidth = 1.0f;
+            // setting cull mode:
+            rasterizer_create_info.cullMode = VK_CULL_MODE_BACK_BIT;
+            rasterizer_create_info.frontFace = VK_FRONT_FACE_CLOCKWISE;
+            // disabling depth bias,
+            rasterizer_create_info.depthBiasEnable = VK_FALSE;
+            // optional properties to config depthBias:
+            rasterizer_create_info.depthBiasConstantFactor = 0.0f;
+            rasterizer_create_info.depthBiasClamp = 0.0f;
+            rasterizer_create_info.depthBiasSlopeFactor = 0.0f;
+        }
 
         // setting up multisampling (disabled)
-        VkPipelineMultisampleStateCreateInfo multisampling_create_info;
-        multisampling_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        multisampling_create_info.sampleShadingEnable = VK_FALSE;
-        multisampling_create_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-        multisampling_create_info.minSampleShading = 1.0f;
-        multisampling_create_info.pSampleMask = NULL;
-        multisampling_create_info.alphaToCoverageEnable = VK_FALSE;
-        multisampling_create_info.alphaToOneEnable = VK_FALSE;
+        VkPipelineMultisampleStateCreateInfo multisampling_create_info; {
+            memset(&multisampling_create_info, 0, sizeof(multisampling_create_info));
+            multisampling_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+            multisampling_create_info.sampleShadingEnable = VK_FALSE;
+            multisampling_create_info.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            multisampling_create_info.minSampleShading = 1.0f;
+            multisampling_create_info.pSampleMask = NULL;
+            multisampling_create_info.alphaToCoverageEnable = VK_FALSE;
+            multisampling_create_info.alphaToOneEnable = VK_FALSE;
+        }
 
         // disabling depth testing; will ignore
         // VkPipelineDepthStencilStateCreateInfo
 
         // color blending: no alpha
         // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions#page_Color-blending
-        VkPipelineColorBlendAttachmentState color_blend_attachment;
-        color_blend_attachment.colorWriteMask = (
-            VK_COLOR_COMPONENT_R_BIT |
-            VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT |
-            VK_COLOR_COMPONENT_A_BIT
-        );
-        color_blend_attachment.blendEnable = VK_FALSE;
-        color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
-        color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-        color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        VkPipelineColorBlendAttachmentState color_blend_attachment; {
+            color_blend_attachment.colorWriteMask = (
+                VK_COLOR_COMPONENT_R_BIT |
+                VK_COLOR_COMPONENT_G_BIT |
+                VK_COLOR_COMPONENT_B_BIT |
+                VK_COLOR_COMPONENT_A_BIT
+            );
+            color_blend_attachment.blendEnable = VK_FALSE;
+            color_blend_attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            color_blend_attachment.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            color_blend_attachment.colorBlendOp = VK_BLEND_OP_ADD;
+            color_blend_attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            color_blend_attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            color_blend_attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        }
 
-        VkPipelineColorBlendStateCreateInfo color_blending_create_info;
-        color_blending_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        color_blending_create_info.logicOpEnable = VK_FALSE;
-        color_blending_create_info.logicOp = VK_LOGIC_OP_COPY;
-        color_blending_create_info.attachmentCount = 1;
-        color_blending_create_info.pAttachments = &color_blend_attachment;
-        color_blending_create_info.blendConstants[0] = 0.0f;
-        color_blending_create_info.blendConstants[1] = 0.0f;
-        color_blending_create_info.blendConstants[2] = 0.0f;
-        color_blending_create_info.blendConstants[3] = 0.0f;
+        VkPipelineColorBlendStateCreateInfo color_blending_create_info; {
+            memset(&color_blending_create_info, 0, sizeof(color_blending_create_info));
+            color_blending_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+            color_blending_create_info.logicOpEnable = VK_FALSE;
+            color_blending_create_info.logicOp = VK_LOGIC_OP_COPY;
+            color_blending_create_info.attachmentCount = 1;
+            color_blending_create_info.pAttachments = &color_blend_attachment;
+            color_blending_create_info.blendConstants[0] = 0.0f;
+            color_blending_create_info.blendConstants[1] = 0.0f;
+            color_blending_create_info.blendConstants[2] = 0.0f;
+            color_blending_create_info.blendConstants[3] = 0.0f;
+        }
 
         // in order to change the above properties, we must specify which states are dynamic:
+        uint32_t dynamic_state_count = 1;
         VkDynamicState dynamic_states[] = {
             VK_DYNAMIC_STATE_VIEWPORT
         };
-        VkPipelineDynamicStateCreateInfo dynamic_state;
-        dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamic_state.dynamicStateCount = 1;
-        dynamic_state.pDynamicStates = dynamic_states;
+        VkPipelineDynamicStateCreateInfo dynamic_state_create_info; {
+            memset(&dynamic_state_create_info, 0, sizeof(dynamic_state_create_info));
+            dynamic_state_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+            dynamic_state_create_info.dynamicStateCount = dynamic_state_count;
+            dynamic_state_create_info.pDynamicStates = dynamic_states;
+        }
 
         // setting up pipeline layout (for uniforms)
-        VkPipelineLayoutCreateInfo pipeline_layout_create_info;
-        pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipeline_layout_create_info.setLayoutCount = 0;
-        pipeline_layout_create_info.pSetLayouts = NULL;
-        pipeline_layout_create_info.pushConstantRangeCount = 0;
-        pipeline_layout_create_info.pPushConstantRanges = NULL;
-        pipeline_layout_create_info.flags = 0;
-        pipeline_layout_create_info.pNext = NULL;
+        VkPipelineLayoutCreateInfo pipeline_layout_create_info; {
+            memset(&pipeline_layout_create_info, 0, sizeof(pipeline_layout_create_info));
+            pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipeline_layout_create_info.setLayoutCount = 0;
+            pipeline_layout_create_info.pSetLayouts = NULL;
+            pipeline_layout_create_info.pushConstantRangeCount = 0;
+            pipeline_layout_create_info.pPushConstantRanges = NULL;
+        }
         VkResult pipeline_create_ok = vkCreatePipelineLayout(
             renderer->vk_device,
             &pipeline_layout_create_info,
@@ -1063,11 +1187,252 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             &renderer->vk_pipeline_layout
         );
         if (pipeline_create_ok != VK_SUCCESS) {
-            assert(0 && "Failed to create pipeline layout.");
+            printf("[Wololo] Failed to create Vulkan pipeline layout.\n");
+            renderer->vk_pipeline_layout_created_ok = false;
+            goto fatal_error;
         } else {
             renderer->vk_pipeline_layout_created_ok = true;
         }
+
+        // finally, creating the graphics pipeline:
+        VkGraphicsPipelineCreateInfo pipeline_create_info; {
+            memset(&pipeline_create_info, 0, sizeof(pipeline_create_info));
+            pipeline_create_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+            pipeline_create_info.stageCount = 2;
+            pipeline_create_info.pStages = shader_stages;
+            pipeline_create_info.pVertexInputState = &vertex_input_info;
+            pipeline_create_info.pInputAssemblyState = &input_assembly;
+            pipeline_create_info.pViewportState = &viewport_state_create_info;
+            pipeline_create_info.pRasterizationState = &rasterizer_create_info;
+            pipeline_create_info.pMultisampleState = &multisampling_create_info;
+            pipeline_create_info.pDepthStencilState = NULL;
+            pipeline_create_info.pColorBlendState = &color_blending_create_info;
+            pipeline_create_info.pDynamicState = &dynamic_state_create_info;
+            pipeline_create_info.layout = renderer->vk_pipeline_layout;
+            pipeline_create_info.renderPass = renderer->vk_render_pass;
+            pipeline_create_info.subpass = 0;
+            pipeline_create_info.basePipelineHandle = VK_NULL_HANDLE;
+            pipeline_create_info.basePipelineIndex = -1;
+            pipeline_create_info.pTessellationState = NULL;
+        }
+
+        VkResult graphics_pipeline_ok = vkCreateGraphicsPipelines(
+            renderer->vk_device, VK_NULL_HANDLE, 
+            1, &pipeline_create_info,
+            NULL,
+            &renderer->vk_graphics_pipeline
+        );
+        if (graphics_pipeline_ok != VK_SUCCESS) {
+            printf("[Wololo] Failed to create a Vulkan graphics pipeline.\n");
+            renderer->vk_graphics_pipeline_ok = false;
+            goto fatal_error;
+        } else {
+            printf("[Wololo] Vulkan graphics pipeline created successfully.\n");
+            renderer->vk_graphics_pipeline_ok = true;
+        }
     }
+
+    //
+    // Preparing for drawing:
+    //
+
+    // creating swapchain framebuffers:
+    // see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Framebuffers
+    {
+        renderer->vk_swapchain_framebuffers = calloc(
+            renderer->vk_swapchain_images_count,
+            sizeof(VkFramebuffer)
+        );
+        for (int i = 0; i < renderer->vk_swapchain_images_count; i++) {
+            VkFramebuffer* fbp = &renderer->vk_swapchain_framebuffers[i];
+            
+            uint32_t attachment_count = 1;
+            VkImageView attachments[] = {
+                renderer->vk_swapchain_image_views[i]
+            };
+            
+            VkFramebufferCreateInfo fb_create_info;
+            memset(&fb_create_info, 0, sizeof(fb_create_info));
+            fb_create_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            fb_create_info.renderPass = renderer->vk_render_pass;
+            fb_create_info.attachmentCount = attachment_count;
+            fb_create_info.pAttachments = attachments;
+            fb_create_info.width = renderer->vk_frame_extent.width;
+            fb_create_info.height = renderer->vk_frame_extent.height;
+            fb_create_info.layers = 1;
+
+            VkResult swapchain_framebuffer_res = vkCreateFramebuffer(
+                renderer->vk_device, 
+                &fb_create_info, 
+                NULL, 
+                fbp
+            );
+            if (swapchain_framebuffer_res != VK_SUCCESS) {
+                printf("[Wololo] Failed to create Vulkan framebuffer %d/%d\n", i+1, renderer->vk_swapchain_images_count);
+            } else {
+                printf("[Wololo] Vulkan framebuffer %d/%d created successfully.\n", i+1, renderer->vk_swapchain_images_count);
+                renderer->vk_swapchain_fbs_ok_count = i;
+            }
+        }
+    }
+
+    // creating command buffer pool:
+    {
+        renderer->vk_command_buffer_pool_ok = false;
+
+        VkCommandPoolCreateInfo pool_info;
+        memset(&pool_info, 0, sizeof(VkCommandPoolCreateInfo));
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.queueFamilyIndex = renderer->vk_graphics_queue_family_index;
+
+        VkResult ok = vkCreateCommandPool(
+            renderer->vk_device,
+            &pool_info,
+            NULL, &renderer->vk_command_buffer_pool
+        );
+        if (ok != VK_SUCCESS) {
+            printf("[Wololo] Failed to create Vulkan Command-Pool for the graphics queue.\n");
+            goto fatal_error;
+        } else {
+            printf("[Wololo] Vulkan Command-Pool for the graphics queue created successfully.\n");
+            renderer->vk_command_buffer_pool_ok = true;
+        }
+    }
+
+    // creating command buffers (managed by the command buffer pool)
+    {
+        renderer->vk_command_buffers_ok = false;
+        renderer->vk_command_buffers = calloc(
+            sizeof(VkCommandBuffer),
+            renderer->vk_swapchain_images_count
+        );
+        assert(renderer->vk_command_buffers != NULL);
+        
+        VkCommandBufferAllocateInfo alloc_info;
+        memset(&alloc_info, 0, sizeof(VkCommandBufferAllocateInfo));
+        alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        alloc_info.commandPool = renderer->vk_command_buffer_pool;
+        alloc_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        alloc_info.commandBufferCount = renderer->vk_swapchain_images_count;
+
+        VkResult ok = vkAllocateCommandBuffers(
+            renderer->vk_device,
+            &alloc_info,
+            renderer->vk_command_buffers
+        );
+        if (ok != VK_SUCCESS) {
+            printf("[Wololo] Failed to allocate Vulkan command buffers.\n");
+            goto fatal_error;
+        } else {
+            renderer->vk_command_buffers_ok = true;
+            printf("[Wololo] Vulkan command buffers allocated successfully.\n");
+        }
+    }
+
+    // Recording the render command buffer (that can be replayed per-frame):
+    // (will eventually just plaster a quad to the screen)
+    // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers#page_Starting-command-buffer-recording
+    {
+        // recall there is one command buffer per swapchain image.
+        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
+            VkCommandBufferBeginInfo begin_info;
+            memset(&begin_info, 0, sizeof(begin_info));
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = 0;
+            begin_info.pInheritanceInfo = NULL;
+
+            VkResult command_buffer_ok = vkBeginCommandBuffer(
+                renderer->vk_command_buffers[i],
+                &begin_info
+            );
+            if (command_buffer_ok != VK_SUCCESS) {
+                printf("[Wololo] Failed to begin recording Vulkan command buffer %u\n", i+1);
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan command buffer %u now recording...\n", i+1);
+            }
+
+            // beginning the render pass:
+            VkRenderPassBeginInfo render_pass_info;
+            {
+                memset(&render_pass_info, 0, sizeof(render_pass_info));
+                render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                render_pass_info.renderPass = renderer->vk_render_pass;
+                render_pass_info.framebuffer = renderer->vk_swapchain_framebuffers[i];
+                render_pass_info.renderArea.offset.x = 0;
+                render_pass_info.renderArea.offset.y = 0;
+                render_pass_info.renderArea.extent = renderer->vk_frame_extent;
+
+                // setting the clear color:
+                VkClearValue clear_color;
+                if (WO_DEBUG) {
+                    // offensive magenta, 100% opacity
+                    clear_color.color = (VkClearColorValue) {1.0f, 0.0f, 1.0f, 1.0f};
+                } else {
+                    // black, 100% opacity
+                    clear_color.color = (VkClearColorValue) {0.0f, 0.0f, 0.0f, 1.0f};
+                }
+                render_pass_info.clearValueCount = 1;
+                render_pass_info.pClearValues = &clear_color;
+            }
+            vkCmdBeginRenderPass(
+                renderer->vk_command_buffers[i],
+                &render_pass_info,
+                VK_SUBPASS_CONTENTS_INLINE
+            );
+            
+            // drawing:
+            {
+                vkCmdBindPipeline(
+                    renderer->vk_command_buffers[i],
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    renderer->vk_graphics_pipeline
+                );
+                vkCmdSetViewport(
+                    renderer->vk_command_buffers[i],
+                    0, 1,
+                    &renderer->vk_viewport
+                );
+                vkCmdDraw(
+                    renderer->vk_command_buffers[i],
+                    3,  // vertex count: todo: change to 6
+                    1,  // instance count: 1 means we're not using it.
+                    0,  // first vertex
+                    0   // first instance
+                );
+                vkCmdEndRenderPass(
+                    renderer->vk_command_buffers[i]
+                );
+            }
+
+            // ending the render pass:
+            if (vkEndCommandBuffer(renderer->vk_command_buffers[i]) != VK_SUCCESS) {
+                printf(
+                    "[Wololo] Recording render pass to Vulkan command buffer %u/%u failed.\n", 
+                    i+1,
+                    renderer->vk_swapchain_images_count
+                );
+                goto fatal_error;
+            } else {
+                printf(
+                    "[Wololo] Vulkan command buffer %u/%u successfully recorded with render pass.\n", 
+                    i+1,
+                    renderer->vk_swapchain_images_count
+                );
+            }
+        }
+    }
+
+    //
+    //
+    //
+    // todo: 
+    // continue from 
+    // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers
+    // but in the main loop.
+    //
+    //
+    //
 
   // should never jump to this label, just flow into naturally.    
   _success:
@@ -1080,31 +1445,35 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     del_renderer(renderer);
     return NULL;
 }
-VkShaderModule vk_load_shader_module(char const* file_path) {
+VkShaderModule vk_load_shader_module(Wo_Renderer* renderer, char const* file_path) {
     // loading all bytecode:
     char* buffer;
     size_t code_size;
     {
         // attempting to open the shader:
-        FILE* shader_file = fopen(file_path, "r");
+        FILE* shader_file = fopen(file_path, "rb");
         assert(shader_file && "Failed to open a shader.");
 
         // creating a buffer based on the maximum file size:
         fseek(shader_file, 0, SEEK_END);
         size_t max_buffer_size = ftell(shader_file);
-        buffer = malloc(max_buffer_size);
+        buffer = calloc(max_buffer_size, 1);
 
         // (resetting the cursor back to the beginning of the file stream)
         fseek(shader_file, 0, SEEK_SET);
 
         // reading all the file's content into the buffer:
         size_t out_index = 0;
-        while (!feof(shader_file)) {
-            int ch = fgetc(shader_file);
-            if (ch <= 0) {
+        while (!feof(shader_file) && !ferror(shader_file)) {
+            int increment = fread(
+                &buffer[out_index],
+                1, 1,
+                shader_file
+            );
+            if (increment <= 0) {
                 break;
             } else {
-                buffer[out_index++] = ch;
+                out_index += increment;
             }
         }
         code_size = out_index;
@@ -1116,17 +1485,76 @@ VkShaderModule vk_load_shader_module(char const* file_path) {
     VkShaderModule shader_module;
     {
         VkShaderModuleCreateInfo create_info;
+        memset(&create_info, 0, sizeof(create_info));
         create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         create_info.codeSize = code_size;
         create_info.pCode = (uint32_t const*)buffer;
+
+        VkResult shader_ok = vkCreateShaderModule(
+            renderer->vk_device,
+            &create_info,
+            NULL,
+            &shader_module
+        );
+        if (shader_ok != VK_SUCCESS) {
+            printf("[Wololo][Vulkan] Failed to create Vulkan shader module '%s'.\n", file_path);
+            shader_module = VK_NULL_HANDLE;
+        } else {
+            printf("[Wololo] Vulkan shader '%s' created successfully.\n", file_path);
+        }
     }
-    
+
     // all done:
     free(buffer);
     return shader_module;
 }
 void del_renderer(Wo_Renderer* renderer) {
     if (renderer != NULL) {
+        // destroying the command pool used to address the graphics queue:
+        // see:
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers
+        {
+            if (renderer->vk_command_buffer_pool_ok) {
+                vkDestroyCommandPool(
+                    renderer->vk_device,
+                    renderer->vk_command_buffer_pool,
+                    NULL
+                );
+                renderer->vk_command_buffer_pool_ok = false;
+
+                free(renderer->vk_command_buffers);
+            }
+        }
+
+        // destroying the framebuffers:
+        // see:
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Framebuffers
+        {
+            if (renderer->vk_swapchain_framebuffers) {
+                for (uint32_t i_fb = 0; i_fb < renderer->vk_swapchain_fbs_ok_count; i_fb++) {
+                    vkDestroyFramebuffer(
+                        renderer->vk_device, 
+                        renderer->vk_swapchain_framebuffers[i_fb],
+                        NULL
+                    );
+                }
+                free(renderer->vk_swapchain_framebuffers);
+            }
+        }
+
+        // destroying the pipeline object:
+        // see:
+        // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Conclusion
+        if (renderer->vk_graphics_pipeline_ok) {
+            vkDestroyPipeline(
+                renderer->vk_device,
+                renderer->vk_graphics_pipeline,
+                NULL
+            );
+            renderer->vk_graphics_pipeline_ok = false;
+        }
+
+        // destroying the pipeline layout:
         // see:
         // https://vulkan-tutorial.com/en/Drawing_a_triangle/Graphics_pipeline_basics/Fixed_functions#page_Dynamic-state
         if (renderer->vk_pipeline_layout_created_ok) {
@@ -1135,8 +1563,22 @@ void del_renderer(Wo_Renderer* renderer) {
                 renderer->vk_pipeline_layout,
                 NULL
             );
+            renderer->vk_pipeline_layout_created_ok = false;
         }
 
+        // destroying the render pass:
+        // see:
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Render_passes
+        if (renderer->vk_render_pass_ok) {
+            vkDestroyPipelineLayout(
+                renderer->vk_device,
+                renderer->vk_pipeline_layout,
+                NULL
+            );
+            renderer->vk_render_pass_ok = false;
+        }
+
+        // destroying the shader modules:
         // see:
         // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Shader_modules
         if (renderer->vk_shaders_loaded_ok) {
@@ -1153,6 +1595,7 @@ void del_renderer(Wo_Renderer* renderer) {
             renderer->vk_shaders_loaded_ok = false;
         }
 
+        // destroying the swapchain image views, then the swapchain:
         if (renderer->vk_swapchain_image_views != NULL) {
             for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
                 vkDestroyImageView(
@@ -1168,18 +1611,20 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_swapchain_images);
             renderer->vk_swapchain_images_count = 0;
         }
+
+        // destroying the Vulkan logical device:
         if (renderer->vk_device != VK_NULL_HANDLE) {
             printf("[Wololo] Destroying Vulkan (logical) device\n");
             vkDestroyDevice(renderer->vk_device, NULL);
         }
+        
+        // destroying the Vulkan present surface:
         if (renderer->vk_present_surface != NULL) {
             printf("[Wololo] Destroying Vulkan window present surface\n");
             vkDestroySurfaceKHR(renderer->vk_instance, renderer->vk_present_surface, NULL);
         }
-        if (renderer->vk_instance != VK_NULL_HANDLE) {
-            printf("[Wololo] Destroying Vulkan instance\n");
-            vkDestroyInstance(renderer->vk_instance, NULL);
-        }
+
+        // destroying the Vulkan physical device, de-allocating buffers:
         if (renderer->vk_physical_devices != NULL) {
             free(renderer->vk_physical_devices);
             renderer->vk_physical_devices = NULL;
@@ -1212,6 +1657,14 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_available_formats);
             renderer->vk_available_formats = NULL;
         }
+
+        // destroying the Vulkan instance:
+        if (renderer->vk_instance != VK_NULL_HANDLE) {
+            printf("[Wololo] Destroying Vulkan instance\n");
+            vkDestroyInstance(renderer->vk_instance, NULL);
+        }
+
+        // finally, destroying the renderer struct:
         printf("[Wololo] Destroying renderer \"%s\"\n", renderer->name);
         free(renderer);
     }
