@@ -1,3 +1,13 @@
+// RENDERER uses the Vulkan API to turn a bag of nodes with attributes
+// into images on screen.
+// 
+// Most of this code is based on a tutorial at
+//  vulkan-tutorial.com/en
+//
+// Pending features:
+// 1.   Swap chain recreation (resize, sub-optimal e.g. monitor change)
+//      https://vulkan-tutorial.com/en/Drawing_a_triangle/Swap_chain_recreation
+
 #include "renderer.h"
 
 #include <stddef.h>
@@ -48,6 +58,10 @@ static char const* optional_vk_device_extension_names[OPTIONAL_VK_DEVICE_EXTENSI
     // Vulkan 1.0 Portability subset.
     // 'VK_KHR_get_physical_device_properties2' is required.
 };
+
+// 'frames in flight' refer to the number of swapchain images we can render to simultaneously:
+// see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Submitting-the-command-buffer
+#define MAX_FRAMES_IN_FLIGHT (2)
 
 // creating a Vulkan error callback:
 // see: https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Validation_layers#page_Message-callback
@@ -109,8 +123,6 @@ struct Wo_Renderer {
     NodeInfo* node_info_table;
     uint64_t* node_is_nonroot_bitset;
     char* name;
-
-    // App reference:
     Wo_App* app;
 
     // Vulkan instances & devices:
@@ -188,6 +200,14 @@ struct Wo_Renderer {
     bool vk_command_buffer_pool_ok;
     VkCommandBuffer* vk_command_buffers;
     bool vk_command_buffers_ok;
+
+    // drawing routine semaphores:
+    VkSemaphore vk_image_available_semaphores[MAX_FRAMES_IN_FLIGHT];
+    VkSemaphore vk_render_finished_semaphores[MAX_FRAMES_IN_FLIGHT];
+    VkFence vk_inflight_fences[MAX_FRAMES_IN_FLIGHT];
+    VkFence* vk_images_inflight_fences;
+    size_t current_frame_index;
+    bool vk_semaphores_oks[MAX_FRAMES_IN_FLIGHT];
 };
 
 
@@ -197,6 +217,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer);
 VkShaderModule vk_load_shader_module(Wo_Renderer* renderer, char const* file_path);
 
 void del_renderer(Wo_Renderer* renderer);
+void draw_frame_with_renderer(Wo_Renderer* renderer);
 bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node);
 void set_nonroot_node(Wo_Renderer* renderer, Wo_Node node);
 
@@ -208,6 +229,7 @@ Wo_Renderer* new_renderer(Wo_App* app, char const* name, size_t max_node_count) 
     // allocating all the memory we need:
     Wo_Renderer* renderer = allocate_renderer(name, max_node_count);
     renderer = vk_init_renderer(app, renderer);
+    renderer->current_frame_index = 0;
     return renderer;
 }
 Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count) {
@@ -983,6 +1005,19 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             render_pass_create_info.pAttachments = &color_attachment_desc;
             render_pass_create_info.subpassCount = 1;
             render_pass_create_info.pSubpasses = &subpass_desc;
+            
+            // adding a subpass dependency to acquire the image at the top of the pipeline:
+            // see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Submitting-the-command-buffer
+            VkSubpassDependency dependency; {
+                dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+                dependency.dstSubpass = 0;
+                dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                dependency.srcAccessMask = 0;
+                dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            }
+            render_pass_create_info.dependencyCount = 1;
+            render_pass_create_info.pDependencies = &dependency;
 
             VkResult render_pass_ok = vkCreateRenderPass(
                 renderer->vk_device,
@@ -1395,7 +1430,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 );
                 vkCmdDraw(
                     renderer->vk_command_buffers[i],
-                    3,  // vertex count: todo: change to 6
+                    6,  // vertex count: 3 x 2 for 2 tris
                     1,  // instance count: 1 means we're not using it.
                     0,  // first vertex
                     0   // first instance
@@ -1423,16 +1458,63 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
-    //
-    //
-    //
-    // todo: 
-    // continue from 
-    // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers
-    // but in the main loop.
-    //
-    //
-    //
+    // Initializing renderer sync objects, like:
+    // - semaphores (GPU-GPU sync): one per frame in flight
+    // - fences (CPU-GPU sync): one per frame in flight
+    {
+        // see: 
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Frames-in-flight
+        
+        // allocating images_inflight_fences, initializing to VK_NULL_HANDLE (0):
+        renderer->vk_images_inflight_fences = calloc(
+            sizeof(VkFence),
+            renderer->vk_swapchain_images_count
+        );
+
+        // creating semaphores and fences:
+        VkSemaphoreCreateInfo semaphore_info;
+        memset(&semaphore_info, 0, sizeof(semaphore_info));
+        semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        
+        VkFenceCreateInfo fence_info;
+        memset(&fence_info, 0, sizeof(fence_info));
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+        // for each possible frame in flight...
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            renderer->vk_semaphores_oks[i] = false;
+
+            VkResult sem1res = vkCreateSemaphore(
+                renderer->vk_device, &semaphore_info, NULL, 
+                &renderer->vk_image_available_semaphores[i]
+            );
+            VkResult sem2res = vkCreateSemaphore(
+                renderer->vk_device, &semaphore_info, NULL,
+                &renderer->vk_render_finished_semaphores[i]
+            );
+            VkResult fence_res = vkCreateFence(
+                renderer->vk_device, &fence_info, NULL,
+                &renderer->vk_inflight_fences[i]
+            );
+
+            if (sem1res != VK_SUCCESS || sem2res != VK_SUCCESS || fence_res != VK_SUCCESS) {
+                printf(
+                    "[Wololo] Failed to create Vulkan synchronization objects for frame %d/%d.\n", 
+                    i+1,
+                    MAX_FRAMES_IN_FLIGHT
+                );
+                goto fatal_error;
+            } else {
+                printf(
+                    "[Wololo] Vulkan synchronization objects for frame %d/%d created successfully.\n", 
+                    i+1,
+                    MAX_FRAMES_IN_FLIGHT
+                );
+                renderer->vk_semaphores_oks[i] = true;
+            }
+        }
+    }
 
   // should never jump to this label, just flow into naturally.    
   _success:
@@ -1510,6 +1592,22 @@ VkShaderModule vk_load_shader_module(Wo_Renderer* renderer, char const* file_pat
 }
 void del_renderer(Wo_Renderer* renderer) {
     if (renderer != NULL) {
+        // Waiting for the device to idle:
+        if (renderer->vk_device != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(renderer->vk_device);
+        }
+
+        // destroying semaphores required in 'draw_frame_from_renderer':
+        // see:
+        // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation
+        for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; i++) {
+            if (renderer->vk_semaphores_oks[i]) {
+                vkDestroySemaphore(renderer->vk_device, renderer->vk_render_finished_semaphores[i], NULL);
+                vkDestroySemaphore(renderer->vk_device, renderer->vk_image_available_semaphores[i], NULL);
+                vkDestroyFence(renderer->vk_device, renderer->vk_inflight_fences[i], NULL);
+            }
+        }
+    
         // destroying the command pool used to address the graphics queue:
         // see:
         // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers
@@ -1669,6 +1767,116 @@ void del_renderer(Wo_Renderer* renderer) {
         free(renderer);
     }
 }
+void draw_frame_with_renderer(Wo_Renderer* renderer) {
+    // this function will perform 3 operations:
+    // - acquire an image from the swapchain
+    // - execute the command buffer with that image as attachment in the framebuffer
+    // - return the image to the swap chain for the presentation
+    // each operation is synchronized using semaphores.
+    // - see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation
+
+    // first, waiting for CPU lock, then reseting the fence (for the next frame index)
+    vkWaitForFences(
+        renderer->vk_device,
+        1, &renderer->vk_inflight_fences[renderer->current_frame_index],
+        VK_TRUE, UINT64_MAX
+    );
+    
+    // When using multiple swapchain images, we need to acquire the index of a swapchain image
+    // that is currently not being read from by the GPU, and is therefore writable.
+    // 'renderer->current_frame_index' stripes through each
+    // NOTE: updated at end of func.
+    uint32_t image_index = -1;
+    vkAcquireNextImageKHR(
+        renderer->vk_device, 
+        renderer->vk_swapchain, 
+        UINT64_MAX,
+        renderer->vk_image_available_semaphores[renderer->current_frame_index],
+        VK_NULL_HANDLE,
+        &image_index
+    );
+
+    // check if a previous frame is using this image,
+    // i.e. we must wait for its fence:
+    if (renderer->vk_images_inflight_fences[image_index] != VK_NULL_HANDLE) {
+        vkWaitForFences(
+            renderer->vk_device,
+            1, &renderer->vk_images_inflight_fences[image_index],
+            VK_TRUE, UINT64_MAX
+        );
+    }
+    
+    // mark the images_inflight_fences frame as 'in-use'
+    // by assigning the inflight-fence to the image-fence:
+    renderer->vk_images_inflight_fences[image_index] = (
+        renderer->vk_inflight_fences[renderer->current_frame_index]
+    );
+    
+    // using the acquired image_index, setting up synchronous chain of ops:
+
+    // first, draw and 'submit' to the semaphore:
+    // "Queue submission and synchronization is configured through parameters in the "
+    // "VkSubmitInfo structure"
+    // see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Submitting-the-command-buffer
+    VkSubmitInfo submit_info;
+    memset(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    VkSemaphore wait_semaphores[] = {
+        renderer->vk_image_available_semaphores[renderer->current_frame_index]
+    };
+    VkPipelineStageFlags wait_stages[] = {
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+    };
+    submit_info.waitSemaphoreCount = 1;
+    submit_info.pWaitSemaphores = wait_semaphores;
+    submit_info.pWaitDstStageMask = wait_stages;
+
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &renderer->vk_command_buffers[image_index];
+
+    VkSemaphore signal_semaphores[] = {
+        renderer->vk_render_finished_semaphores[renderer->current_frame_index]
+    };
+    submit_info.signalSemaphoreCount = 1;
+    submit_info.pSignalSemaphores = signal_semaphores;
+
+    // it is best to reset the fence in use before using it (i.e. submitting the queue):
+    vkResetFences(
+        renderer->vk_device,
+        1, &renderer->vk_inflight_fences[renderer->current_frame_index]
+    );
+    VkResult submit_ok = vkQueueSubmit(
+        renderer->vk_graphics_queue, 
+        1, &submit_info, 
+        renderer->vk_inflight_fences[renderer->current_frame_index]
+    );
+    if (submit_ok != VK_SUCCESS) {
+        printf("Failed to submit draw command buffer (image %u/%u)\n", image_index+1, renderer->vk_swapchain_images_count);
+        fflush(stdout);
+        assert(0 && "Failed to submit draw command buffer");
+    }
+
+    // setting up the second pass: present
+    VkPresentInfoKHR present_info;
+    memset(&present_info, 0, sizeof(present_info));
+    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    present_info.waitSemaphoreCount = 1;
+    present_info.pWaitSemaphores = signal_semaphores;
+    present_info.swapchainCount = 1;
+    present_info.pSwapchains = &renderer->vk_swapchain;
+    present_info.pImageIndices = &image_index;
+    present_info.pResults = NULL;
+    vkQueuePresentKHR(renderer->vk_present_queue, &present_info);
+
+    // sleeping while the submitted command buffer is being processed:
+    vkQueueWaitIdle(renderer->vk_present_queue);
+
+    // updating the current frame index:
+    renderer->current_frame_index = (
+        (renderer->current_frame_index + 1) %
+        MAX_FRAMES_IN_FLIGHT
+    );
+}
 bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node) {
     if (renderer->current_node_count == renderer->max_node_count) {
         return false;
@@ -1737,6 +1945,9 @@ Wo_Renderer* wo_renderer_new(Wo_App* app, char const* name, size_t max_renderer_
 }
 void wo_renderer_del(Wo_Renderer* renderer) {
     del_renderer(renderer);
+}
+void wo_renderer_draw_frame(Wo_Renderer* renderer) {
+    draw_frame_with_renderer(renderer);
 }
 
 Wo_Node wo_renderer_add_sphere_node(Wo_Renderer* renderer, Wo_Scalar radius) {

@@ -141,8 +141,8 @@ bool app_run(Wo_App* app) {
             }
         }
 
-        // TODO: Render here (using renderer)
-        // cf https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Base_code
+        // Rendering here using renderer:
+        wo_renderer_draw_frame(app->renderer);
         
         // Swap front and back buffers
         // glfwSwapBuffers(app->glfw_window);

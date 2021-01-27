@@ -17,6 +17,7 @@ typedef uint32_t Wo_Material;
 
 Wo_Renderer* wo_renderer_new(Wo_App* app, char const* name, size_t max_node_count);
 void wo_renderer_del(Wo_Renderer* renderer);
+void wo_renderer_draw_frame(Wo_Renderer* renderer);
 
 typedef struct Wo_Node_Argument Wo_Node_Argument;
 struct Wo_Node_Argument {
@@ -29,5 +30,4 @@ Wo_Node wo_renderer_add_infinite_planar_partition_node(Wo_Renderer* renderer, Wo
 Wo_Node wo_renderer_add_union_of_node(Wo_Renderer* renderer, Wo_Node_Argument left, Wo_Node_Argument right);
 Wo_Node wo_renderer_add_intersection_of_node(Wo_Renderer* renderer, Wo_Node_Argument left, Wo_Node_Argument right);
 Wo_Node wo_renderer_add_difference_of_node(Wo_Renderer* renderer, Wo_Node_Argument left, Wo_Node_Argument right);
-
 bool wo_renderer_isroot(Wo_Renderer* renderer, Wo_Node node);
