@@ -18,7 +18,7 @@ void test1_de_init_cb(Wo_App* app);
 int main_test1() {
     Wo_App* app = wo_app_new(
         60.0,
-        600, 450, "Test 1",
+        1280, 720, "Test 1",
         test1_init_cb, test1_update_cb, test1_de_init_cb
     );
     bool ok = wo_app_run(app);

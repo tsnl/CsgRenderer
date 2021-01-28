@@ -1079,12 +1079,13 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
 
         // loading vertex shader data:
         // (currently no data to load)
-        // (not entirely sure how this is different from uniforms, but it gets baked aot)
         VkPipelineVertexInputStateCreateInfo vertex_input_info; {
             memset(&vertex_input_info, 0, sizeof(vertex_input_info));
             vertex_input_info.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+            
             vertex_input_info.vertexBindingDescriptionCount = 0;
             vertex_input_info.pVertexBindingDescriptions = NULL;
+            
             vertex_input_info.vertexAttributeDescriptionCount = 0;
             vertex_input_info.pVertexAttributeDescriptions = NULL;
         }

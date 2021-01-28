@@ -1,10 +1,12 @@
 # Wololo Renderer
 
-A ray-tracing renderer using Constructive Solid Geometry (CSG) to represent scenes and 
-Spatiotemporal Variance-Guided Filtering (SVGF) for single sample-per-pixel ray-tracing.
+(Work in progress)
 
-Despite the complicated names, should make creating procedural assets easier, produce 
-high-quality rendered images, and allow me to explore temporal filtering.
+A cross-platform GPU-accelerated ray-tracing renderer using Vulkan.
+Currently working through 
+[Ray Tracing in One Weekend](https://raytracing.github.io/books/RayTracingInOneWeekend.html), but in GLSL.
+
+<img src="doc/milestones/01-hwaccel-sphere-normals.png">
 
 # Build
 
@@ -22,7 +24,9 @@ high-quality rendered images, and allow me to explore temporal filtering.
 
 # Try It Out
 
-- Run the following snippet in your console:
+- After building, run the following snippet in your shell of choice
+  to execute the `wololo_demo` executable generated in the root directory
+  of this repository.
     ```
     $ ./wololo_demo
     ```
