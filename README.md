@@ -6,6 +6,12 @@ A cross-platform GPU-accelerated ray-tracing renderer using Vulkan.
 Currently working through 
 [Ray Tracing in One Weekend](https://raytracing.github.io/books/RayTracingInOneWeekend.html), but in GLSL.
 
+The primary advantage of ray-tracing, even with few bounces, is its
+support for procedural geometry that isn't in discrete (i.e. vertex)
+form. Thus, this renderer will first try to support **Constructive**
+**Solid Geometry**, with support for vertex-based meshes added later
+(at which point **this repository will be renamed**).
+
 <img src="doc/milestones/01-hwaccel-sphere-normals.png">
 
 # Build

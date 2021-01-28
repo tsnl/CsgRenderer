@@ -121,6 +121,18 @@ bool app_run(Wo_App* app) {
     // Loop until the user closes the window
     double time_at_last_frame_sec = glfwGetTime();
     double total_running_behind_by_sec = 0.0;
+
+    // first of many 'clocks'... should be abstracted.
+    double interval_between_frametime_reports_sec = 1.0;
+    // assume one report has been printed already, so we wait before the first report.
+    // now reports are 'scheduled' every N seconds, with this counter incrementing N.
+    size_t reports_printed_so_far = 1;
+    // we sum the frame times and sq frame times, and display mean and stddev
+    // see: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+    size_t frames_counted_since_last_report = 0;
+    double sum_of_frame_time_diffs_sec = 0.0;
+    double sum_of_sq_frame_time_diffs_sec_sq = 0.0;
+
     while (!glfwWindowShouldClose(app->glfw_window))
     {
         // Updating:
@@ -129,15 +141,56 @@ bool app_run(Wo_App* app) {
             double time_at_this_frame_sec = glfwGetTime();
             double time_difference_sec = time_at_this_frame_sec - time_at_last_frame_sec;
             assert(time_difference_sec >= 0 && "glfwGetTime not monotonic-- who called glfwSetTime?");
+            time_at_last_frame_sec = time_at_this_frame_sec;
 
             // adding the difference to the 'running behind' count...
             total_running_behind_by_sec += time_difference_sec;
-
+            
             // and then running updates at the desired resolution until we aren't running behind
             // by a frame anymore:
             while (app->extension_update_cb != NULL && total_running_behind_by_sec >= app->update_time_sec) {
                 total_running_behind_by_sec -= app->update_time_sec;
                 app->extension_update_cb(app, app->update_time_sec);
+            }
+
+            // updating frame time reports:
+            frames_counted_since_last_report++;
+            sum_of_frame_time_diffs_sec += time_difference_sec;
+            sum_of_sq_frame_time_diffs_sec_sq += time_difference_sec * time_difference_sec;
+
+            // printing frame-time reports:
+            // print at most one per frame.
+            if (time_at_this_frame_sec > reports_printed_so_far * interval_between_frametime_reports_sec) {
+                reports_printed_so_far++;
+                
+                if (frames_counted_since_last_report == 1) {
+                    // really bad! we just printed a report last frame, must be printing reports too frequently
+                    printf("... See above (printing reports too frequently)\n");
+                } else {
+                    double sx2 = sum_of_sq_frame_time_diffs_sec_sq;
+                    size_t sx = sum_of_frame_time_diffs_sec;
+                    size_t n = frames_counted_since_last_report;
+
+                    // using 'a naive algorithm to calculate estimated variance'
+                    // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
+                    double fps = n / interval_between_frametime_reports_sec;
+                    double mean_ft_sec = sx / n;
+                    double stddev_ft = (
+                        (sx2 - (sx * sx / n)) / 
+                        (n - 1)
+                    );
+                    printf(
+                        "[Wololo][Stats] | %zu frames / %.3lf sec = %.3lf fps | Avg. Frame-Time: %.3lf sec | Stddev. Frame-Time: %.3lf |\n",
+                        n, interval_between_frametime_reports_sec, fps,
+                        mean_ft_sec,
+                        stddev_ft
+                    );
+                    
+                    // resetting metrics:
+                    frames_counted_since_last_report = 0;
+                    sum_of_frame_time_diffs_sec = 0;
+                    sum_of_sq_frame_time_diffs_sec_sq = 0;
+                }
             }
         }
 
