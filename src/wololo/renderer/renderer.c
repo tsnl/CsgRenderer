@@ -302,7 +302,6 @@ struct Wo_Renderer {
     // descriptor queues, used to bind uniform buffers:
     VkDescriptorPool vk_descriptor_pool;
     VkDescriptorSet* vk_descriptor_sets;
-    VkDescriptorSetLayout* vk_descriptor_set_layouts;
     bool vk_descriptor_pool_ok;
 
     // drawing routine semaphores:
@@ -1143,7 +1142,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         fubo_descriptor_set_layout_binding.pImmutableSamplers = NULL;
     }
 
-    // creating the descriptor set layout:
+    // creating the descriptor set layouts:
     VkDescriptorSetLayoutCreateInfo layout_info;
     {
         memset(&layout_info, 0, sizeof(layout_info));
@@ -1505,100 +1504,6 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
-    // Recording the render command buffer (that can be replayed per-frame):
-    // (will eventually just plaster a quad to the screen)
-    // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers#page_Starting-command-buffer-recording
-    {
-        // recall there is one command buffer per swapchain image.
-        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
-            VkCommandBufferBeginInfo begin_info;
-            memset(&begin_info, 0, sizeof(begin_info));
-            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-            begin_info.flags = 0;
-            begin_info.pInheritanceInfo = NULL;
-
-            VkResult command_buffer_ok = vkBeginCommandBuffer(
-                renderer->vk_command_buffers[i],
-                &begin_info
-            );
-            if (command_buffer_ok != VK_SUCCESS) {
-                printf("[Wololo] Failed to begin recording Vulkan command buffer %u\n", i+1);
-                goto fatal_error;
-            } else {
-                printf("[Wololo] Vulkan command buffer %u now recording...\n", i+1);
-            }
-
-            // beginning the render pass:
-            VkRenderPassBeginInfo render_pass_info;
-            {
-                memset(&render_pass_info, 0, sizeof(render_pass_info));
-                render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-                render_pass_info.renderPass = renderer->vk_render_pass;
-                render_pass_info.framebuffer = renderer->vk_swapchain_framebuffers[i];
-                render_pass_info.renderArea.offset.x = 0;
-                render_pass_info.renderArea.offset.y = 0;
-                render_pass_info.renderArea.extent = renderer->vk_frame_extent;
-
-                // setting the clear color:
-                VkClearValue clear_color;
-                if (WO_DEBUG) {
-                    // offensive magenta, 100% opacity
-                    clear_color.color = (VkClearColorValue) {1.0f, 0.0f, 1.0f, 1.0f};
-                } else {
-                    // black, 100% opacity
-                    clear_color.color = (VkClearColorValue) {0.0f, 0.0f, 0.0f, 1.0f};
-                }
-                render_pass_info.clearValueCount = 1;
-                render_pass_info.pClearValues = &clear_color;
-            }
-            vkCmdBeginRenderPass(
-                renderer->vk_command_buffers[i],
-                &render_pass_info,
-                VK_SUBPASS_CONTENTS_INLINE
-            );
-            
-            // drawing:
-            {
-                vkCmdBindPipeline(
-                    renderer->vk_command_buffers[i],
-                    VK_PIPELINE_BIND_POINT_GRAPHICS,
-                    renderer->vk_graphics_pipeline
-                );
-                vkCmdSetViewport(
-                    renderer->vk_command_buffers[i],
-                    0, 1,
-                    &renderer->vk_viewport
-                );
-                vkCmdDraw(
-                    renderer->vk_command_buffers[i],
-                    6,  // vertex count: 3 x 2 for 2 tris
-                    1,  // instance count: 1 means we're not using it.
-                    0,  // first vertex
-                    0   // first instance
-                );
-                vkCmdEndRenderPass(
-                    renderer->vk_command_buffers[i]
-                );
-            }
-
-            // ending the render pass:
-            if (vkEndCommandBuffer(renderer->vk_command_buffers[i]) != VK_SUCCESS) {
-                printf(
-                    "[Wololo] Recording render pass to Vulkan command buffer %u/%u failed.\n", 
-                    i+1,
-                    renderer->vk_swapchain_images_count
-                );
-                goto fatal_error;
-            } else {
-                printf(
-                    "[Wololo] Vulkan command buffer %u/%u successfully recorded with render pass.\n", 
-                    i+1,
-                    renderer->vk_swapchain_images_count
-                );
-            }
-        }
-    }
-
     // Initializing buffer objects, like:
     // - uniform buffer objects
     {
@@ -1666,10 +1571,13 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     // see:
     // https://vulkan-tutorial.com/Uniform_buffers/Descriptor_pool_and_sets
     {
-        renderer->vk_descriptor_set_layouts = calloc(
+        VkDescriptorSetLayout* layouts = calloc(
             renderer->vk_swapchain_images_count,
             sizeof(VkDescriptorSetLayout)
         );
+        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
+            layouts[i] = renderer->vk_descriptor_set_layout;
+        }
         renderer->vk_descriptor_sets = calloc(
             renderer->vk_swapchain_images_count,
             sizeof(VkDescriptorSet)
@@ -1680,7 +1588,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             alloc_info.descriptorPool = renderer->vk_descriptor_pool;
             alloc_info.descriptorSetCount = renderer->vk_swapchain_images_count;
-            alloc_info.pSetLayouts = renderer->vk_descriptor_set_layouts;
+            alloc_info.pSetLayouts = layouts;
             alloc_info.pNext = NULL;
         }
         VkResult desc_sets_ok = vkAllocateDescriptorSets(
@@ -1696,23 +1604,26 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
 
         // if allocation was successful, configuring each descriptor:
         for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
-            VkDescriptorBufferInfo buffer_info;
-            memset(&buffer_info, 0, sizeof(buffer_info));
-            buffer_info.buffer = renderer->uniform_buffers[i];
-            buffer_info.offset = 0;
-            buffer_info.range = sizeof(FragmentUniformBufferObject);
+            VkDescriptorBufferInfo buffer_info; {
+                memset(&buffer_info, 0, sizeof(buffer_info));
+                buffer_info.buffer = renderer->uniform_buffers[i];
+                buffer_info.offset = 0;
+                buffer_info.range = sizeof(FragmentUniformBufferObject);
+            }
+            VkWriteDescriptorSet w_desc; {
+                memset(&w_desc, 0, sizeof(w_desc));
 
-            VkWriteDescriptorSet w_desc;
-            w_desc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            w_desc.dstSet = &renderer->vk_descriptor_sets[i];
-            w_desc.dstBinding = 0;
-            w_desc.dstArrayElement = 0;
-            w_desc.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            w_desc.descriptorCount = 1;
+                w_desc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w_desc.dstSet = renderer->vk_descriptor_sets[i];
+                w_desc.dstBinding = 0;
+                w_desc.dstArrayElement = 0;
+                w_desc.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+                w_desc.descriptorCount = 1;
 
-            w_desc.pBufferInfo = &buffer_info;
-            w_desc.pImageInfo = NULL;
-            w_desc.pTexelBufferView = NULL;
+                w_desc.pBufferInfo = &buffer_info;
+                w_desc.pImageInfo = NULL;
+                w_desc.pTexelBufferView = NULL;
+            }
 
             vkUpdateDescriptorSets(
                 renderer->vk_device,
@@ -1722,6 +1633,109 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
 
         printf("Vulkan descriptor sets for Uniform data created successfully.\n");
+    }
+
+    // Recording the render command buffer (that can be replayed per-frame):
+    // (will eventually just plaster a quad to the screen)
+    // https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Command_buffers#page_Starting-command-buffer-recording
+    {
+        // recall there is one command buffer per swapchain image.
+        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
+            VkCommandBufferBeginInfo begin_info;
+            memset(&begin_info, 0, sizeof(begin_info));
+            begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            begin_info.flags = 0;
+            begin_info.pInheritanceInfo = NULL;
+
+            VkResult command_buffer_ok = vkBeginCommandBuffer(
+                renderer->vk_command_buffers[i],
+                &begin_info
+            );
+            if (command_buffer_ok != VK_SUCCESS) {
+                printf("[Wololo] Failed to begin recording Vulkan command buffer %u\n", i+1);
+                goto fatal_error;
+            } else {
+                printf("[Wololo] Vulkan command buffer %u now recording...\n", i+1);
+            }
+
+            // beginning the render pass:
+            VkRenderPassBeginInfo render_pass_info;
+            {
+                memset(&render_pass_info, 0, sizeof(render_pass_info));
+                render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                render_pass_info.renderPass = renderer->vk_render_pass;
+                render_pass_info.framebuffer = renderer->vk_swapchain_framebuffers[i];
+                render_pass_info.renderArea.offset.x = 0;
+                render_pass_info.renderArea.offset.y = 0;
+                render_pass_info.renderArea.extent = renderer->vk_frame_extent;
+
+                // setting the clear color:
+                VkClearValue clear_color;
+                if (WO_DEBUG) {
+                    // offensive magenta, 100% opacity
+                    clear_color.color = (VkClearColorValue) {1.0f, 0.0f, 1.0f, 1.0f};
+                } else {
+                    // black, 100% opacity
+                    clear_color.color = (VkClearColorValue) {0.0f, 0.0f, 0.0f, 1.0f};
+                }
+                render_pass_info.clearValueCount = 1;
+                render_pass_info.pClearValues = &clear_color;
+            }
+            vkCmdBeginRenderPass(
+                renderer->vk_command_buffers[i],
+                &render_pass_info,
+                VK_SUBPASS_CONTENTS_INLINE
+            );
+            
+            // drawing:
+            {
+                vkCmdBindPipeline(
+                    renderer->vk_command_buffers[i],
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    renderer->vk_graphics_pipeline
+                );
+                vkCmdSetViewport(
+                    renderer->vk_command_buffers[i],
+                    0, 1,
+                    &renderer->vk_viewport
+                );
+                
+                vkCmdBindDescriptorSets(
+                    renderer->vk_command_buffers[i],
+                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                    renderer->vk_pipeline_layout,
+                    0, 
+                    1, &renderer->vk_descriptor_sets[i],
+                    0, NULL
+                );
+                vkCmdDraw(
+                    renderer->vk_command_buffers[i],
+                    6,  // vertex count: 3 x 2 for 2 tris
+                    1,  // instance count: 1 means we're not using it.
+                    0,  // first vertex
+                    0   // first instance
+                );
+                vkCmdEndRenderPass(
+                    renderer->vk_command_buffers[i]
+                );
+            }
+
+            // ending the render pass:
+            if (vkEndCommandBuffer(renderer->vk_command_buffers[i]) != VK_SUCCESS) {
+                printf(
+                    "[Wololo] Recording render pass to Vulkan command buffer %u/%u failed.\n", 
+                    i+1,
+                    renderer->vk_swapchain_images_count
+                );
+                goto fatal_error;
+            } else {
+                printf(
+                    "[Wololo] Vulkan command buffer %u/%u successfully recorded with render pass.\n", 
+                    i+1,
+                    renderer->vk_swapchain_images_count
+                );
+            }
+        }
     }
 
     // Initializing renderer sync objects, like:
@@ -1962,6 +1976,13 @@ void del_renderer(Wo_Renderer* renderer) {
         }
 
         // destroying the swapchain image views, then the swapchain:
+        if (renderer->vk_descriptor_set_layout) {
+            vkDestroyDescriptorSetLayout(
+                renderer->vk_device,
+                renderer->vk_descriptor_set_layout,
+                NULL
+            );
+        }
         if (renderer->uniform_buffers) {
             assert(renderer->uniform_buffers_memory);
             for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
@@ -1986,9 +2007,6 @@ void del_renderer(Wo_Renderer* renderer) {
                 NULL
             );
             renderer->vk_descriptor_pool_ok = false;
-        
-            free(renderer->vk_descriptor_set_layouts);
-            renderer->vk_descriptor_set_layouts = NULL;
         }
         if (renderer->vk_swapchain_image_views != NULL) {
             for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
@@ -2110,17 +2128,11 @@ void draw_frame_with_renderer(Wo_Renderer* renderer) {
     
     // using the acquired image_index, setting up synchronous chain of ops:
 
-    // it is best to reset the fence in use before using it (i.e. submitting the queue):
-    vkResetFences(
-        renderer->vk_device,
-        1, &renderer->vk_inflight_fences[renderer->current_frame_index]
-    );
-
     // updating Fragment Uniform Buffer Object:
     {
         FragmentUniformBufferObject fubo;
         memset(&fubo, 0, sizeof(fubo));
-        fubo.time_since_start_sec = glfwGetTime(wo_app_glfw_window(renderer->app));
+        fubo.time_since_start_sec = glfwGetTime();
         fubo.resolution_x = (float)renderer->vk_frame_extent.width;
         fubo.resolution_y = (float)renderer->vk_frame_extent.height;
     
@@ -2167,6 +2179,11 @@ void draw_frame_with_renderer(Wo_Renderer* renderer) {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = signal_semaphores;
 
+    // it is best to reset the fence in use before using it (i.e. submitting the queue):
+    vkResetFences(
+        renderer->vk_device,
+        1, &renderer->vk_inflight_fences[renderer->current_frame_index]
+    );
     VkResult submit_ok = vkQueueSubmit(
         renderer->vk_graphics_queue, 
         1, &submit_info, 

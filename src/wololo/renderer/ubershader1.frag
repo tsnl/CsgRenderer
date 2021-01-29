@@ -47,7 +47,7 @@ vec3 COLOR_sky_blue = vec3(0.5, 0.7, 1.0);
 //
 
 // camera config:
-float focal_length = 0.2;
+float focal_length = 1.0;
 
 vec3 origin = vec3(0,0,0);
 vec3 horizontal = vec3(aspect_ratio, 0, 0);
@@ -67,7 +67,7 @@ struct RT_Ray {
 RT_Ray rt_ray(vec3 origin_pt, vec3 direction) {
     RT_Ray ray;
     ray.origin_pt = origin_pt;
-    ray.direction = direction;
+    ray.direction = normalize(direction);
     return ray;
 }
 
@@ -97,9 +97,15 @@ float hit_sphere(vec3 center, float radius, RT_Ray ray) {
 vec3 ray_color(RT_Ray ray) {
     // checking sphere #1:
     {
-        float t = hit_sphere(vec3(0,0,-1), 0.5, ray);
+        vec3 sphere_pos = vec3(0,0,-1);
+        float amplitude = 2;
+        float omega = 2 * 3.1415 / 4;
+        sphere_pos.y = amplitude * sin(omega * fubo.time_since_start_sec);
+        sphere_pos.z -= 10;
+        float radius = 0.5;
+        float t = hit_sphere(sphere_pos, radius, ray);
         if (t > 0.0) {
-            vec3 normal = normalize(ray.direction * t - vec3(0,0,-1));
+            vec3 normal = normalize(ray.direction * t - sphere_pos);
             return (
                 0.5 * (normal + vec3(1.0, 1.0, 1.0))
             );
@@ -126,10 +132,8 @@ vec3 ray_color(RT_Ray ray) {
 
 void ep_debug_view_1() {
     out_color = vec4(
-        1.0,
-        resolution.y,
-        0,
-        1.0
+        st.x, st.y,
+        0, 1.0
     );
 }
 
@@ -154,6 +158,6 @@ void ep_rt1_1() {
 //
 
 void main() {
-    ep_debug_view_1();
-    // ep_rt1_1();
+    // ep_debug_view_1();
+    ep_rt1_1();
 }
