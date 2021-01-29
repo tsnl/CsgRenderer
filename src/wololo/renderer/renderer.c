@@ -1075,13 +1075,14 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
 
         // creating one sub-pass:
-        VkSubpassDescription subpass_desc;
+        VkAttachmentReference color_attachment_ref;
         {
-            VkAttachmentReference color_attachment_ref;
             memset(&color_attachment_ref, 0, sizeof(color_attachment_ref));
             color_attachment_ref.attachment = 0;
             color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
+        }
+        VkSubpassDescription subpass_desc;
+        {
             // zero-ing out and filling relevant fields:
             memset(&subpass_desc, 0, sizeof(subpass_desc));
             subpass_desc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -1560,10 +1561,10 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             &renderer->vk_descriptor_pool
         );
         if (descriptor_pool_ok != VK_SUCCESS) {
-            printf("Failed to create Vulkan descriptor pool for Uniform data.\n");
+            printf("[Wololo] Failed to create Vulkan descriptor pool for Uniform data.\n");
             goto fatal_error;
         } else {
-            printf("Vulkan descriptor pool for Uniform data created successfully.\n");
+            printf("[Wololo] Vulkan descriptor pool for Uniform data created successfully.\n");
             renderer->vk_descriptor_pool_ok = true;
         }
     }
@@ -1598,7 +1599,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         );
 
         if (desc_sets_ok != VK_SUCCESS) {
-            printf("Failed to create Vulkan descriptor sets for Uniform data.\n");
+            printf("[Wololo] Failed to create Vulkan descriptor sets for Uniform data.\n");
             goto fatal_error;
         }
 
