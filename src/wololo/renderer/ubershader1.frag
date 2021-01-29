@@ -6,12 +6,17 @@
 layout(location = 0) in  vec3 _discard;
 layout(location = 0) out vec4 out_color;
 
-// FIXME: hard-coded DPI & resolution
-// correct this when implementing resizable windows
-// using uniform buffer objects.
-vec2 raw_resolution = vec2(1280, 720);
-float highdpi_scale = 2.0;
-vec2 resolution = highdpi_scale * raw_resolution;
+// Adding a shared Fragment Uniform Buffer Object:
+// the primary way to communicate between CPU and GPU.
+// see:
+// https://vulkan-tutorial.com/Uniform_buffers/Descriptor_layout_and_buffer
+layout(binding = 0) uniform FragmentUniformBufferObject {
+    float time_since_start_sec;
+    float resolution_x;
+    float resolution_y;
+} fubo;
+
+vec2 resolution = vec2(fubo.resolution_x, fubo.resolution_y);
 float aspect_ratio = resolution.x / resolution.y;
 
 // 'st' coordinates are coordinates in [0,1]x[0,1] for
@@ -19,8 +24,8 @@ float aspect_ratio = resolution.x / resolution.y;
 // x = 0 => left edge, x = 1 => right edge
 // y = 0 => top edge,  y = 1 => bottom edge
 vec2 st = vec2(
-    abs((gl_FragCoord.x / resolution.x)),
-    abs(1.0 - (gl_FragCoord.y / resolution.y))
+    (gl_FragCoord.x / resolution.x),
+    1.0 - (gl_FragCoord.y / resolution.y)
 );
 
 // 'pq' coordinates are coordinates in resolution space.
@@ -121,8 +126,8 @@ vec3 ray_color(RT_Ray ray) {
 
 void ep_debug_view_1() {
     out_color = vec4(
-        st.x,
-        st.y,
+        1.0,
+        resolution.y,
         0,
         1.0
     );
@@ -149,6 +154,6 @@ void ep_rt1_1() {
 //
 
 void main() {
-    // ep_debug_view_1();
-    ep_rt1_1();
+    ep_debug_view_1();
+    // ep_rt1_1();
 }

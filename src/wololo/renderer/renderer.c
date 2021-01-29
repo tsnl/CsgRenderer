@@ -35,28 +35,15 @@
 //
 //
 
-static uint32_t const DEFAULT_VK_VALIDATION_LAYER_COUNT = 1;
+#define DEFAULT_VK_VALIDATION_LAYER_COUNT (1)
 static char const* default_vk_validation_layer_names[DEFAULT_VK_VALIDATION_LAYER_COUNT] = {
     "VK_LAYER_KHRONOS_validation"
 };
 
 // minimum extensions are required for the app to run at all.
-static uint32_t const MINIMUM_VK_DEVICE_EXTENSION_COUNT = 1;
+#define MINIMUM_VK_DEVICE_EXTENSION_COUNT (1)
 static char const* minimum_vk_device_extension_names[MINIMUM_VK_DEVICE_EXTENSION_COUNT] = {
     "VK_KHR_swapchain"
-};
-
-// optional extensions are loaded if supported.
-static uint32_t const OPTIONAL_VK_DEVICE_EXTENSION_COUNT = 0;
-static char const* optional_vk_device_extension_names[OPTIONAL_VK_DEVICE_EXTENSION_COUNT] = {
-    // "VK_KHR_portability_subset",
-    // https://www.moltengl.com/docs/readme/moltenvk-readme-user-guide.html
-    // https://www.khronos.org/registry/vulkan/specs/1.2-extensions/man/html/VK_KHR_portability_subset.html
-    // according to the Vulkan spec, if the `VK_KHR_portability_subset` extension is included [...],
-    // then ppEnabledExtensions must include [it].
-    // This allows the implementation to work on MoltenVK, among other platforms that support the 
-    // Vulkan 1.0 Portability subset.
-    // 'VK_KHR_get_physical_device_properties2' is required.
 };
 
 // 'frames in flight' refer to the number of swapchain images we can render to simultaneously:
@@ -78,6 +65,112 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL vk_debug_callback(
         );
     }
     return VK_TRUE;
+}
+
+// Fragment-UBO (Uniform Buffer Object) shared with shaders and constant
+// after renderer initialization:
+typedef struct FragmentUniformBufferObject FragmentUniformBufferObject;
+struct FragmentUniformBufferObject {
+    // field 1: float time_since_start_sec
+    float time_since_start_sec;
+
+    // field 2: vec2 resolution
+    float resolution_x;
+    float resolution_y;
+};
+
+// Vulkan buffer creation:
+uint32_t help_find_vk_buffer_memory_type(
+    VkPhysicalDevice physical_device,
+    uint32_t type_filter,
+    VkMemoryPropertyFlags properties
+) {
+    VkPhysicalDeviceMemoryProperties mem_properties;
+    vkGetPhysicalDeviceMemoryProperties(physical_device, &mem_properties);
+    for (uint32_t i = 0; i < mem_properties.memoryTypeCount; i++) {
+        bool bit_supported = type_filter & (1 << i);
+        bool props_supported = properties == (mem_properties.memoryTypes[i].propertyFlags & properties);
+        if (bit_supported && props_supported) {
+            return i;
+        }
+    }
+
+    assert(0 && "Failed to find suitable Vulkan buffer memory type.");
+    return -1;
+}
+void new_vk_buffer(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    VkDeviceSize size,
+    VkBufferUsageFlags usage,
+    VkMemoryPropertyFlags properties,
+    VkBuffer* buffer_p,
+    VkDeviceMemory* buffer_memory_p
+) {
+    VkBufferCreateInfo buffer_info; {
+        memset(&buffer_info, 0, sizeof(buffer_info));
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = size;
+        buffer_info.usage = usage;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    }
+    VkResult buffer_ok = vkCreateBuffer(
+        device,
+        &buffer_info,
+        NULL,
+        buffer_p
+    );
+    if (buffer_ok != VK_SUCCESS) {
+        printf("[Wololo] Failed to create Vulkan buffer.\n");
+        assert(0 && "Vulkan buffer creation failed.");
+    }
+
+    VkMemoryRequirements mem_requirements;
+    memset(&mem_requirements, 0, sizeof(mem_requirements));
+    vkGetBufferMemoryRequirements(device, *buffer_p, &mem_requirements);
+
+    VkMemoryAllocateInfo alloc_info;
+    memset(&alloc_info, 0, sizeof(alloc_info));
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_requirements.size;
+    alloc_info.memoryTypeIndex = help_find_vk_buffer_memory_type(
+        physical_device,
+        mem_requirements.memoryTypeBits,
+        properties
+    );
+    VkResult alloc_ok = vkAllocateMemory(
+        device, &alloc_info, NULL,
+        buffer_memory_p
+    );
+    if (alloc_ok != VK_SUCCESS) {
+        printf("[Wololo] Failed to allocate Vulkan buffer.\n");
+        assert(0 && "Vulkan buffer allocation failed.");
+    }
+
+    // finally, associating the buffer's ID with the memory:
+    vkBindBufferMemory(
+        device,
+        *buffer_p,
+        *buffer_memory_p,
+        0
+    );
+}
+void new_vk_uniform_buffer(
+    VkPhysicalDevice physical_device,
+    VkDevice device,
+    VkDeviceSize size,
+    VkBuffer* buffer_p,
+    VkDeviceMemory* buffer_memory_p
+) {
+    new_vk_buffer(
+        physical_device,
+        device,
+        size,
+        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        buffer_p,
+        buffer_memory_p
+    );
 }
 
 //
@@ -187,9 +280,11 @@ struct Wo_Renderer {
 
     // pipeline layout (for uniforms):
     bool vk_pipeline_layout_created_ok;
+    VkDescriptorSetLayout vk_descriptor_set_layout;
     VkPipelineLayout vk_pipeline_layout;
     VkRenderPass vk_render_pass;
     bool vk_render_pass_ok;
+    bool vk_descriptor_set_layout_ok;
 
     // the graphics pipeline
     VkPipeline vk_graphics_pipeline;
@@ -200,6 +295,15 @@ struct Wo_Renderer {
     bool vk_command_buffer_pool_ok;
     VkCommandBuffer* vk_command_buffers;
     bool vk_command_buffers_ok;
+
+    // uniform buffers, per-swapchain image:
+    VkBuffer* uniform_buffers;
+    VkDeviceMemory* uniform_buffers_memory;
+    // descriptor queues, used to bind uniform buffers:
+    VkDescriptorPool vk_descriptor_pool;
+    VkDescriptorSet* vk_descriptor_sets;
+    VkDescriptorSetLayout* vk_descriptor_set_layouts;
+    bool vk_descriptor_pool_ok;
 
     // drawing routine semaphores:
     VkSemaphore vk_image_available_semaphores[MAX_FRAMES_IN_FLIGHT];
@@ -238,7 +342,7 @@ Wo_Renderer* allocate_renderer(char const* name, size_t max_node_count) {
     size_t subslab2_info_table_size_in_bytes = sizeof(NodeInfo) * max_node_count;
     size_t subslab3_root_bitset_size_in_bytes = ((max_node_count/64 + 1)*64) / 8;
     size_t subslab4_name_size_in_bytes = 0; {
-        int name_length = strlen(name);
+        size_t name_length = strlen(name);
         if (name_length > 0) {
             subslab4_name_size_in_bytes = 1+name_length;
         }
@@ -301,7 +405,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     // creating a Vulkan instance, applying validation layers:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Instance
     {
-        VkApplicationInfo app_info = {}; {
+        VkApplicationInfo app_info; {
+            memset(&app_info, 0, sizeof(app_info));
             app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
             app_info.pApplicationName = renderer->name;
             app_info.applicationVersion = VK_MAKE_VERSION(0, 0, 0);
@@ -310,7 +415,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             app_info.apiVersion = VK_API_VERSION_1_0;
         }
 
-        VkInstanceCreateInfo create_info = {0}; {
+        VkInstanceCreateInfo create_info; {
+            memset(&create_info, 0, sizeof(create_info));
             create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
             create_info.pApplicationInfo = &app_info;
             create_info.enabledLayerCount = 0;
@@ -432,20 +538,23 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
     // creating a logical device, setting command queues + queue indices:
     // https://vulkan-tutorial.com/en/Drawing_a_triangle/Setup/Logical_device_and_queues
     {
-        VkDeviceQueueCreateInfo queue_create_info = {};
+        VkDeviceQueueCreateInfo queue_create_info;
+        memset(&queue_create_info, 0, sizeof(queue_create_info));
         queue_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
         queue_create_info.queueFamilyIndex = renderer->vk_graphics_queue_family_index;
         queue_create_info.queueCount = 1;
-        float queue_priority = 1.0f;
+        float const queue_priority = 1.0f;
         queue_create_info.pQueuePriorities = &queue_priority;
 
         // don't need any special device features:
-        VkPhysicalDeviceFeatures device_features = {};
+        VkPhysicalDeviceFeatures device_features;
+        memset(&device_features, 0, sizeof(device_features));
 
         // creating the instance...
-        VkDeviceCreateInfo create_info = {};
+        VkDeviceCreateInfo create_info;
+        memset(&create_info, 0, sizeof(create_info));
         create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-        
+
         // setting up queues:
         create_info.pQueueCreateInfos = &queue_create_info;
         create_info.queueCreateInfoCount = 1;
@@ -487,7 +596,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         // storing all enabled extensions' names:
         uint32_t max_extension_count = (
             MINIMUM_VK_DEVICE_EXTENSION_COUNT + 
-            OPTIONAL_VK_DEVICE_EXTENSION_COUNT
+            0
         );
         renderer->vk_enabled_device_extension_count = 0;
         renderer->vk_enabled_device_extension_names = calloc(max_extension_count, sizeof(char const*));
@@ -516,30 +625,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 goto fatal_error;
             }
         }
-        for (uint32_t opt_ext_index = 0; opt_ext_index < OPTIONAL_VK_DEVICE_EXTENSION_COUNT; opt_ext_index++) {
-            char const* ext_name = optional_vk_device_extension_names[opt_ext_index];
-            
-            // searching for this extension:
-            bool ext_found = false;
-            uint32_t const available_count = renderer->vk_available_device_extension_count;
-            for (uint32_t available_ext_index = 0; available_ext_index < available_count; available_ext_index++) {
-                VkExtensionProperties available_ext_props = renderer->vk_available_device_extensions[available_ext_index];
-                char const* available_ext_name = available_ext_props.extensionName;
-
-                if (0 == strcmp(available_ext_name, ext_name)) {
-                    ext_found = true;
-                    break;
-                }
-            }
-            if (ext_found) {
-                printf("[Wololo] Found [optional] Vulkan device extension \"%s\"\n", ext_name);
-                uint32_t index = renderer->vk_enabled_device_extension_count++;
-                renderer->vk_enabled_device_extension_names[index] = ext_name;
-            } else {
-                // do nothing; optional extension.
-            }
-        }
-
+        
         // setting extension request args:
         create_info.enabledExtensionCount = renderer->vk_enabled_device_extension_count;
         create_info.ppEnabledExtensionNames = renderer->vk_enabled_device_extension_names;
@@ -819,6 +905,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 renderer->vk_present_queue_family_index
             };
             {
+                memset(&swapchain_create_info, 0, sizeof(swapchain_create_info));
+
                 swapchain_create_info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
                 swapchain_create_info.surface = renderer->vk_present_surface;
                 swapchain_create_info.minImageCount = image_count;
@@ -926,27 +1014,30 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         // then, calling on Vulkan to create, thereby populating the array:
         for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
             VkImageViewCreateInfo create_info;
-            create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            create_info.image = renderer->vk_swapchain_images[index];
-            create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            create_info.format = renderer->vk_chosen_present_surface_format.format;
-            
-            // each pixel is composed of one or more values corresponding to channels
-            // in the output image, e.g. red (R), green (G), blue (B), and alpha (A).
-            // 'swizzle' describes a linear transformation on a bit-vector, and just tells
-            // Vulkan how to access each component.
-            create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
-            create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
-            create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
-            create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
-            
-            // setting up mipmapping levels, or multiple layers (for stereographic 3D)
-            create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            create_info.subresourceRange.baseMipLevel = 0;
-            create_info.subresourceRange.levelCount = 1;
-            create_info.subresourceRange.baseArrayLayer = 0;
-            create_info.subresourceRange.layerCount = 1;
-            
+            {
+                memset(&create_info, 0, sizeof(create_info));
+                create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                create_info.image = renderer->vk_swapchain_images[index];
+                create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                create_info.format = renderer->vk_chosen_present_surface_format.format;
+
+                // each pixel is composed of one or more values corresponding to channels
+                // in the output image, e.g. red (R), green (G), blue (B), and alpha (A).
+                // 'swizzle' describes a linear transformation on a bit-vector, and just tells
+                // Vulkan how to access each component.
+                create_info.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
+                create_info.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
+                create_info.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
+                create_info.components.a = VK_COMPONENT_SWIZZLE_IDENTITY;
+
+                // setting up mipmapping levels, or multiple layers (for stereographic 3D)
+                create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                create_info.subresourceRange.baseMipLevel = 0;
+                create_info.subresourceRange.levelCount = 1;
+                create_info.subresourceRange.baseArrayLayer = 0;
+                create_info.subresourceRange.layerCount = 1;
+            }
+
             // creating the VkImageView:
             VkResult ok = vkCreateImageView(
                 renderer->vk_device, 
@@ -968,6 +1059,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         // add a single color bufer attachment, represented by an image from the swapchain:
         VkAttachmentDescription color_attachment_desc;
         {
+            memset(&color_attachment_desc, 0, sizeof(color_attachment_desc));
             color_attachment_desc.format = renderer->vk_chosen_present_surface_format.format;
             color_attachment_desc.samples = VK_SAMPLE_COUNT_1_BIT;
             // loadOp and storeOp used for color and depth
@@ -987,6 +1079,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         VkSubpassDescription subpass_desc;
         {
             VkAttachmentReference color_attachment_ref;
+            memset(&color_attachment_ref, 0, sizeof(color_attachment_ref));
             color_attachment_ref.attachment = 0;
             color_attachment_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
@@ -1009,6 +1102,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             // adding a subpass dependency to acquire the image at the top of the pipeline:
             // see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Submitting-the-command-buffer
             VkSubpassDependency dependency; {
+                memset(&dependency, 0, sizeof(dependency));
                 dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
                 dependency.dstSubpass = 0;
                 dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -1032,6 +1126,52 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
                 printf("[Wololo] Vulkan render pass created successfully.\n");
                 renderer->vk_render_pass_ok = true;
             }
+        }
+    }
+
+    // creating a descriptor set for the UBO:
+    // see:
+    // https://vulkan-tutorial.com/Uniform_buffers/Descriptor_layout_and_buffer
+    VkDescriptorSetLayoutBinding fubo_descriptor_set_layout_binding;
+    {
+        memset(&fubo_descriptor_set_layout_binding, 0, sizeof(fubo_descriptor_set_layout_binding));
+        fubo_descriptor_set_layout_binding.binding = 0;
+        fubo_descriptor_set_layout_binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        fubo_descriptor_set_layout_binding.descriptorCount = 1;
+    
+        fubo_descriptor_set_layout_binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        fubo_descriptor_set_layout_binding.pImmutableSamplers = NULL;
+    }
+
+    // creating the descriptor set layout:
+    VkDescriptorSetLayoutCreateInfo layout_info;
+    {
+        memset(&layout_info, 0, sizeof(layout_info));
+
+        renderer->vk_descriptor_set_layout_ok = false;
+
+        layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layout_info.bindingCount = 1;
+        layout_info.pBindings = &fubo_descriptor_set_layout_binding;
+
+        VkResult ok = vkCreateDescriptorSetLayout(
+            renderer->vk_device,
+            &layout_info,
+            NULL,
+            &renderer->vk_descriptor_set_layout
+        );
+        if (ok != VK_SUCCESS) {
+            printf(
+                "[Wololo] Failed to create Vulkan descriptor set layout "
+                "(for fragment uniform).\n"
+            );
+            goto fatal_error;
+        } else {
+            printf(
+                "[Wololo] Successfully created a Vulkan descriptor set "
+                "layout (for fragment uniform).\n"
+            );
+            renderer->vk_descriptor_set_layout_ok = true;
         }
     }
 
@@ -1211,8 +1351,8 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         VkPipelineLayoutCreateInfo pipeline_layout_create_info; {
             memset(&pipeline_layout_create_info, 0, sizeof(pipeline_layout_create_info));
             pipeline_layout_create_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            pipeline_layout_create_info.setLayoutCount = 0;
-            pipeline_layout_create_info.pSetLayouts = NULL;
+            pipeline_layout_create_info.setLayoutCount = 1;
+            pipeline_layout_create_info.pSetLayouts = &renderer->vk_descriptor_set_layout;
             pipeline_layout_create_info.pushConstantRangeCount = 0;
             pipeline_layout_create_info.pPushConstantRanges = NULL;
         }
@@ -1279,7 +1419,7 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
             renderer->vk_swapchain_images_count,
             sizeof(VkFramebuffer)
         );
-        for (int i = 0; i < renderer->vk_swapchain_images_count; i++) {
+        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
             VkFramebuffer* fbp = &renderer->vk_swapchain_framebuffers[i];
             
             uint32_t attachment_count = 1;
@@ -1459,6 +1599,131 @@ Wo_Renderer* vk_init_renderer(Wo_App* app, Wo_Renderer* renderer) {
         }
     }
 
+    // Initializing buffer objects, like:
+    // - uniform buffer objects
+    {
+        assert(renderer->vk_swapchain_images_count > 0);
+
+        renderer->uniform_buffers = calloc(
+            renderer->vk_swapchain_images_count,
+            sizeof(VkBuffer)
+        );
+        renderer->uniform_buffers_memory = calloc(
+            renderer->vk_swapchain_images_count,
+            sizeof(VkDeviceMemory)
+        );
+        assert(renderer->uniform_buffers && renderer->uniform_buffers_memory);
+
+        uint32_t buf_count = renderer->vk_swapchain_images_count;
+        for (uint32_t i = 0; i < buf_count; i++) {
+            new_vk_uniform_buffer(
+                renderer->vk_physical_device,
+                renderer->vk_device,
+                sizeof(FragmentUniformBufferObject),
+                &renderer->uniform_buffers[i],
+                &renderer->uniform_buffers_memory[i]
+            );
+        }
+    }
+
+    // initializing a descriptor pool to bind uniforms to shader:
+    // https://vulkan-tutorial.com/Uniform_buffers/Descriptor_pool_and_sets
+    {
+        renderer->vk_descriptor_pool_ok = false;
+
+        // configuring maximum descriptor pool size:
+        VkDescriptorPoolSize pool_size; {
+            memset(&pool_size, 0, sizeof(pool_size));
+            pool_size.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            pool_size.descriptorCount = renderer->vk_swapchain_images_count;
+        }
+
+        // and the maximum number of pools:
+        VkDescriptorPoolCreateInfo pool_info; {
+            memset(&pool_info, 0, sizeof(pool_info));
+            pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            pool_info.poolSizeCount = 1;
+            pool_info.pPoolSizes = &pool_size;
+            pool_info.maxSets = renderer->vk_swapchain_images_count;
+            pool_info.flags = 0;
+        }
+
+        VkResult descriptor_pool_ok = vkCreateDescriptorPool(
+            renderer->vk_device,
+            &pool_info,
+            NULL,
+            &renderer->vk_descriptor_pool
+        );
+        if (descriptor_pool_ok != VK_SUCCESS) {
+            printf("Failed to create Vulkan descriptor pool for Uniform data.\n");
+            goto fatal_error;
+        } else {
+            printf("Vulkan descriptor pool for Uniform data created successfully.\n");
+            renderer->vk_descriptor_pool_ok = true;
+        }
+    }
+    // Creating descriptor sets using the descriptor pool above^
+    // see:
+    // https://vulkan-tutorial.com/Uniform_buffers/Descriptor_pool_and_sets
+    {
+        renderer->vk_descriptor_set_layouts = calloc(
+            renderer->vk_swapchain_images_count,
+            sizeof(VkDescriptorSetLayout)
+        );
+        renderer->vk_descriptor_sets = calloc(
+            renderer->vk_swapchain_images_count,
+            sizeof(VkDescriptorSet)
+        );
+
+        VkDescriptorSetAllocateInfo alloc_info; {
+            memset(&alloc_info, 0, sizeof(alloc_info));
+            alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            alloc_info.descriptorPool = renderer->vk_descriptor_pool;
+            alloc_info.descriptorSetCount = renderer->vk_swapchain_images_count;
+            alloc_info.pSetLayouts = renderer->vk_descriptor_set_layouts;
+            alloc_info.pNext = NULL;
+        }
+        VkResult desc_sets_ok = vkAllocateDescriptorSets(
+            renderer->vk_device,
+            &alloc_info,
+            renderer->vk_descriptor_sets
+        );
+
+        if (desc_sets_ok != VK_SUCCESS) {
+            printf("Failed to create Vulkan descriptor sets for Uniform data.\n");
+            goto fatal_error;
+        }
+
+        // if allocation was successful, configuring each descriptor:
+        for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
+            VkDescriptorBufferInfo buffer_info;
+            memset(&buffer_info, 0, sizeof(buffer_info));
+            buffer_info.buffer = renderer->uniform_buffers[i];
+            buffer_info.offset = 0;
+            buffer_info.range = sizeof(FragmentUniformBufferObject);
+
+            VkWriteDescriptorSet w_desc;
+            w_desc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w_desc.dstSet = &renderer->vk_descriptor_sets[i];
+            w_desc.dstBinding = 0;
+            w_desc.dstArrayElement = 0;
+            w_desc.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            w_desc.descriptorCount = 1;
+
+            w_desc.pBufferInfo = &buffer_info;
+            w_desc.pImageInfo = NULL;
+            w_desc.pTexelBufferView = NULL;
+
+            vkUpdateDescriptorSets(
+                renderer->vk_device,
+                1, &w_desc,
+                0, NULL
+            );
+        }
+
+        printf("Vulkan descriptor sets for Uniform data created successfully.\n");
+    }
+
     // Initializing renderer sync objects, like:
     // - semaphores (GPU-GPU sync): one per frame in flight
     // - fences (CPU-GPU sync): one per frame in flight
@@ -1548,7 +1813,7 @@ VkShaderModule vk_load_shader_module(Wo_Renderer* renderer, char const* file_pat
         // reading all the file's content into the buffer:
         size_t out_index = 0;
         while (!feof(shader_file) && !ferror(shader_file)) {
-            int increment = fread(
+            size_t increment = fread(
                 &buffer[out_index],
                 1, 1,
                 shader_file
@@ -1622,6 +1887,7 @@ void del_renderer(Wo_Renderer* renderer) {
                 renderer->vk_command_buffer_pool_ok = false;
 
                 free(renderer->vk_command_buffers);
+                renderer->vk_command_buffers = NULL;
             }
         }
 
@@ -1638,6 +1904,7 @@ void del_renderer(Wo_Renderer* renderer) {
                     );
                 }
                 free(renderer->vk_swapchain_framebuffers);
+                renderer->vk_swapchain_framebuffers = NULL;
             }
         }
 
@@ -1669,9 +1936,9 @@ void del_renderer(Wo_Renderer* renderer) {
         // see:
         // https://vulkan-tutorial.com/Drawing_a_triangle/Graphics_pipeline_basics/Render_passes
         if (renderer->vk_render_pass_ok) {
-            vkDestroyPipelineLayout(
+            vkDestroyRenderPass(
                 renderer->vk_device,
-                renderer->vk_pipeline_layout,
+                renderer->vk_render_pass,
                 NULL
             );
             renderer->vk_render_pass_ok = false;
@@ -1695,6 +1962,34 @@ void del_renderer(Wo_Renderer* renderer) {
         }
 
         // destroying the swapchain image views, then the swapchain:
+        if (renderer->uniform_buffers) {
+            assert(renderer->uniform_buffers_memory);
+            for (uint32_t i = 0; i < renderer->vk_swapchain_images_count; i++) {
+                vkDestroyBuffer(
+                    renderer->vk_device,
+                    renderer->uniform_buffers[i],
+                    NULL
+                );
+                vkFreeMemory(
+                    renderer->vk_device,
+                    renderer->uniform_buffers_memory[i],
+                    NULL
+                );
+            }
+            free(renderer->uniform_buffers);
+            free(renderer->uniform_buffers_memory);
+        }
+        if (renderer->vk_descriptor_pool_ok) {
+            vkDestroyDescriptorPool(
+                renderer->vk_device,
+                renderer->vk_descriptor_pool,
+                NULL
+            );
+            renderer->vk_descriptor_pool_ok = false;
+        
+            free(renderer->vk_descriptor_set_layouts);
+            renderer->vk_descriptor_set_layouts = NULL;
+        }
         if (renderer->vk_swapchain_image_views != NULL) {
             for (size_t index = 0; index < renderer->vk_swapchain_images_count; index++) {
                 vkDestroyImageView(
@@ -1710,7 +2005,7 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_swapchain_images);
             renderer->vk_swapchain_images_count = 0;
         }
-
+        
         // destroying the Vulkan logical device:
         if (renderer->vk_device != VK_NULL_HANDLE) {
             printf("[Wololo] Destroying Vulkan (logical) device\n");
@@ -1732,8 +2027,8 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_available_validation_layers);
             renderer->vk_available_validation_layers = NULL;
         }
-        if (renderer->vk_enabled_validation_layer_names != NULL) {
-            free(renderer->vk_enabled_validation_layer_names);
+        if (renderer->vk_enabled_validation_layer_names) {
+            free((void*)renderer->vk_enabled_validation_layer_names);
             renderer->vk_enabled_validation_layer_names = NULL;
         }
         if (renderer->vk_queue_family_properties != NULL) {
@@ -1744,8 +2039,8 @@ void del_renderer(Wo_Renderer* renderer) {
             free(renderer->vk_available_device_extensions);
             renderer->vk_available_device_extensions = NULL;
         }
-        if (renderer->vk_enabled_device_extension_names != NULL) {
-            free(renderer->vk_enabled_device_extension_names);
+        if (renderer->vk_enabled_device_extension_names) {
+            free((void*)renderer->vk_enabled_device_extension_names);
             renderer->vk_enabled_device_extension_names = NULL;
         }
         if (renderer->vk_available_present_modes != NULL) {
@@ -1815,7 +2110,38 @@ void draw_frame_with_renderer(Wo_Renderer* renderer) {
     
     // using the acquired image_index, setting up synchronous chain of ops:
 
-    // first, draw and 'submit' to the semaphore:
+    // it is best to reset the fence in use before using it (i.e. submitting the queue):
+    vkResetFences(
+        renderer->vk_device,
+        1, &renderer->vk_inflight_fences[renderer->current_frame_index]
+    );
+
+    // updating Fragment Uniform Buffer Object:
+    {
+        FragmentUniformBufferObject fubo;
+        memset(&fubo, 0, sizeof(fubo));
+        fubo.time_since_start_sec = glfwGetTime(wo_app_glfw_window(renderer->app));
+        fubo.resolution_x = (float)renderer->vk_frame_extent.width;
+        fubo.resolution_y = (float)renderer->vk_frame_extent.height;
+    
+        void* data = NULL;
+        VkResult map_ok = vkMapMemory(
+            renderer->vk_device,
+            renderer->uniform_buffers_memory[image_index],
+            0,
+            sizeof(fubo),
+            0,
+            &data
+        );
+        assert(map_ok == VK_SUCCESS && "Failed to map Vulkan UBO.");
+        memcpy(data, &fubo, sizeof(fubo));
+        vkUnmapMemory(
+            renderer->vk_device,
+            renderer->uniform_buffers_memory[image_index]
+        );
+    }
+
+    // after drawing ops, 'submit' to the semaphore:
     // "Queue submission and synchronization is configured through parameters in the "
     // "VkSubmitInfo structure"
     // see: https://vulkan-tutorial.com/Drawing_a_triangle/Drawing/Rendering_and_presentation#page_Submitting-the-command-buffer
@@ -1841,11 +2167,6 @@ void draw_frame_with_renderer(Wo_Renderer* renderer) {
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = signal_semaphores;
 
-    // it is best to reset the fence in use before using it (i.e. submitting the queue):
-    vkResetFences(
-        renderer->vk_device,
-        1, &renderer->vk_inflight_fences[renderer->current_frame_index]
-    );
     VkResult submit_ok = vkQueueSubmit(
         renderer->vk_graphics_queue, 
         1, &submit_info, 
@@ -1882,7 +2203,7 @@ bool allocate_node(Wo_Renderer* renderer, Wo_Node* out_node) {
     if (renderer->current_node_count == renderer->max_node_count) {
         return false;
     } else {
-        *out_node = renderer->current_node_count++;
+        *out_node = (Wo_Node)renderer->current_node_count++;
         return true;
     }
 }
@@ -1969,6 +2290,6 @@ Wo_Node wo_renderer_add_difference_of_node(Wo_Renderer* renderer, Wo_Node_Argume
 
 bool wo_renderer_isroot(Wo_Renderer* renderer, Wo_Node node) {
     uint64_t cmp_word = renderer->node_is_nonroot_bitset[node/64];
-    uint64_t is_nonroot = cmp_word & (1 << (node%64));
+    uint64_t is_nonroot = cmp_word & ((size_t)1 << (size_t)(node%64));
     return !is_nonroot;
 }
